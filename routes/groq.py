@@ -25,7 +25,7 @@ CONTEXT = (
     "If the user asks for code, provide well-commented examples. If you are unsure, explain how the user might investigate further."
 )
 
-@groq_bp.route('/llm', methods=['POST'])
+@groq_bp.route('/general-llm', methods=['POST'])
 def call_llm():
     
     #initial error check
