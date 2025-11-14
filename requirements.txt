@@ -1,2 +1,11 @@
+#server requirements
 flask
 flask-cors
+
+#RAG requirements
+python-dotenv
+pypdf
+chromadb
+sentence-transformers
+groq
+langchain-text-splitters
