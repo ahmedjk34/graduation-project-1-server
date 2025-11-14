@@ -10,7 +10,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # Model used for LLM generation
-GROQ_MODEL = "llama3-70b-8192"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 # ChromaDB Configuration
 CHROMA_PATH = "./chroma_storage"
