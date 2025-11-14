@@ -87,6 +87,7 @@ def ingest_directory(data_dir: str = "./data") -> Dict:
             continue
 
         path = os.path.join(data_dir, fname)
+        print(f"Processing file {fname}")
         # 4. Extract text from PDF
         pages = extract_pdf_text(path)
         if not pages:
