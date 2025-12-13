@@ -185,3 +185,200 @@ def ingest_slides():
             "error": f"Ingestion failed: {str(e)}"
         }), 500
 
+
+# Generates quiz questions from one or more slide decks
+# Returns quiz in format ready to be stored in database
+@rag_bp.route("/generate-quiz", methods=["POST"])
+def generate_quiz():
+    # 1. Validate request is JSON
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON."}), 400
+    
+    data = request.get_json(silent=True) or {}
+    
+    # 2. Validate required parameters
+    deck_ids = data.get("deck_ids")
+    if not deck_ids:
+        return jsonify({"error": "'deck_ids' (array) is required."}), 400
+    
+    if not isinstance(deck_ids, list) or len(deck_ids) == 0:
+        return jsonify({"error": "'deck_ids' must be a non-empty array."}), 400
+    
+    question_count = int(data.get("question_count", 10))
+    question_type = data.get("question_type", "multiple_choice")
+    quiz_description = data.get("quiz_description", "")
+    
+    # 3. Validate question_type
+    valid_types = ["multiple_choice", "true_false", "short_answer"]
+    if question_type not in valid_types:
+        return jsonify({
+            "error": f"'question_type' must be one of: {', '.join(valid_types)}"
+        }), 400
+    
+    try:
+        from rag.retrieval import get_all_slides_from_decks, groq_client
+        from config import GROQ_MODEL
+        import json
+        import re
+        
+        # 4. Get all slides from all specified decks
+        slides = get_all_slides_from_decks(deck_ids)
+        
+        if not slides:
+            return jsonify({
+                "error": f"No slides found for deck_ids: {deck_ids}"
+            }), 404
+        
+        # 5. Format all slides into context for LLM
+        slide_texts = []
+        for slide in slides:
+            slide_num = slide.get("slide_number", 0)
+            slide_title = slide.get("slide_title", "")
+            slide_text = slide.get("text", "")
+            deck_id = slide.get("deck_id", "")
+            slide_texts.append(f"--- DECK: {deck_id} | SLIDE {slide_num}: {slide_title} ---\n{slide_text}")
+        
+        all_content = "\n\n".join(slide_texts)
+        
+        # 6. Build prompt based on question type
+        if question_type == "multiple_choice":
+            question_format = """For each question, provide:
+- question_text: The question text
+- options: JSON array of exactly 4 options (e.g., ["Option A text", "Option B text", "Option C text", "Option D text"])
+- correct_answer: The letter of the correct answer ("A", "B", "C", or "D")
+- explanation: Brief explanation (1-2 sentences) of why this answer is correct"""
+            
+            example = """{
+      "question_text": "What is the main topic discussed in the slides?",
+      "options": ["Option A text", "Option B text", "Option C text", "Option D text"],
+      "correct_answer": "A",
+      "explanation": "This is correct because..."
+    }"""
+        
+        elif question_type == "true_false":
+            question_format = """For each question, provide:
+- question_text: The statement (should be clearly true or false)
+- options: JSON array with exactly 2 options: ["True", "False"]
+- correct_answer: Either "true" or "false" (lowercase)
+- explanation: Brief explanation (1-2 sentences) of why this answer is correct"""
+            
+            example = """{
+      "question_text": "The concept discussed in slide 5 is fundamental to understanding the topic.",
+      "options": ["True", "False"],
+      "correct_answer": "true",
+      "explanation": "This is correct because..."
+    }"""
+        
+        else:  # short_answer
+            question_format = """For each question, provide:
+- question_text: The question text
+- options: null (not used for short answer)
+- correct_answer: The expected answer text
+- explanation: Brief explanation (1-2 sentences) of the answer"""
+            
+            example = """{
+      "question_text": "What is the main concept introduced in slide 3?",
+      "options": null,
+      "correct_answer": "The main concept is...",
+      "explanation": "This is correct because..."
+    }"""
+        
+        # 7. Build quiz generation prompt
+        description_note = f"\n\nAdditional Instructions: {quiz_description}" if quiz_description else ""
+        
+        quiz_prompt = f"""Generate {question_count} {question_type.replace('_', ' ')} quiz questions based on the following slide deck content.
+
+Requirements:
+- Questions should cover different topics from the slides
+- Questions should be clear and unambiguous
+- {question_format}
+- Include both factual recall and comprehension questions when possible
+{description_note}
+
+Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+{{
+  "questions": [
+    {example}
+  ]
+}}
+
+Slide Deck Content:
+{all_content}"""
+        
+        # 8. Call Groq to generate quiz
+        if groq_client is None:
+            return jsonify({"error": "GROQ_API_KEY is missing or invalid."}), 500
+        
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert quiz generator. Generate clear, accurate quiz questions based on the provided content. Always return valid JSON only."
+            },
+            {
+                "role": "user",
+                "content": quiz_prompt
+            }
+        ]
+        
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=0.7,
+        )
+        
+        quiz_text = response.choices[0].message.content.strip()
+        
+        # 9. Parse JSON from response (clean up if needed)
+        quiz_text = re.sub(r'```json\s*', '', quiz_text)
+        quiz_text = re.sub(r'```\s*', '', quiz_text)
+        quiz_text = quiz_text.strip()
+        
+        try:
+            quiz_json = json.loads(quiz_text)
+        except json.JSONDecodeError:
+            # Try to find JSON object in response
+            json_match = re.search(r'\{.*\}', quiz_text, re.DOTALL)
+            if json_match:
+                quiz_json = json.loads(json_match.group())
+            else:
+                raise ValueError("No valid JSON found in LLM response")
+        
+        # 10. Validate structure
+        if "questions" not in quiz_json:
+            return jsonify({
+                "error": "Invalid quiz format: missing 'questions' field",
+                "raw_response": quiz_text[:500]
+            }), 500
+        
+        # 11. Transform to database-ready format
+        # Add order_index and points to each question
+        formatted_questions = []
+        for idx, q in enumerate(quiz_json.get("questions", []), start=1):
+            formatted_q = {
+                "question_text": q.get("question_text", ""),
+                "question_type": question_type,
+                "options": q.get("options"),  # JSONB - can be array or null
+                "correct_answer": q.get("correct_answer", ""),
+                "points": 1,  # Default, can be customized
+                "order_index": idx,
+                "explanation": q.get("explanation", "")
+            }
+            formatted_questions.append(formatted_q)
+        
+        # 12. Return quiz in database-ready format
+        return jsonify({
+            "deck_ids": deck_ids,
+            "total_slides": len(slides),
+            "question_count": len(formatted_questions),
+            "question_type": question_type,
+            "questions": formatted_questions
+        }), 200
+    
+    except json.JSONDecodeError as e:
+        return jsonify({
+            "error": f"Failed to parse quiz JSON: {str(e)}",
+            "raw_response": quiz_text[:500] if 'quiz_text' in locals() else "N/A"
+        }), 500
+    except Exception as e:
+        return jsonify({"error": f"Quiz generation failed: {str(e)}"}), 500
+

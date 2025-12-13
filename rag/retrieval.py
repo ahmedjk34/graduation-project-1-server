@@ -242,6 +242,44 @@ def expand_slide_neighbors(slide_hits: List[Dict[str, Any]], neighbor_range: int
     return neighbor_contexts
 
 
+# Gets ALL slides from one or more specific decks (no semantic search)
+# Returns all slides sorted by deck_id and slide number
+# Used for quiz generation where we need comprehensive content
+def get_all_slides_from_decks(deck_ids: List[str]) -> List[Dict]:
+    all_slides = []
+    
+    # 1. Query ChromaDB for all slide chunks from each deck
+    for deck_id in deck_ids:
+        try:
+            results = collection.get(
+                where={
+                    "$and": [
+                        {"deck_id": deck_id},
+                        {"chunk_type": "slide"}
+                    ]
+                },
+                include=["documents", "metadatas"]
+            )
+            
+            # 2. Process results into structured format
+            for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
+                all_slides.append({
+                    "text": doc,
+                    "source": meta.get("source"),
+                    "deck_id": meta.get("deck_id"),
+                    "slide_number": meta.get("slide_number"),
+                    "slide_title": meta.get("slide_title", ""),
+                    "chunk_type": "slide"
+                })
+        except Exception as e:
+            logger.error(f"Failed to fetch slides for deck {deck_id}: {e}")
+            continue
+    
+    # 3. Sort by deck_id then slide number to maintain order
+    all_slides.sort(key=lambda x: (x.get("deck_id", ""), x.get("slide_number", 0)))
+    return all_slides
+
+
 # Formats contexts into prompt for Groq
 # Includes source citations (page numbers or slide numbers)
 def build_prompt(question: str, contexts: List[Dict]) -> List[Dict]:
