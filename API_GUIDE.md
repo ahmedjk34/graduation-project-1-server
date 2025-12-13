@@ -396,6 +396,140 @@ curl -X POST http://localhost:5000/groq/general-llm \
 
 ---
 
+### 4. Ingest Slide Decks (PDF/PPTX)
+
+**Endpoint:** `POST /rag/ingest-slides`
+
+**Description:** Ingests a single slide deck (PDF or PPTX) into ChromaDB. Supports mixed text/image slides with optional OCR and dual chunking strategy (slide chunks + window chunks).
+
+**Request Format:**
+
+This endpoint expects **multipart/form-data** (file upload).
+
+**Parameters:**
+
+- `file` (required): The slide deck file (PDF or PPTX)
+- `file_type` (required): Must be `"pdf"` or `"pptx"` (case-insensitive)
+- `deck_id` (optional): Custom deck identifier (auto-generated if not provided)
+
+**Important:** The `file_type` parameter is **required** and must be explicitly provided. The system does not auto-detect file type.
+
+#### cURL Example
+
+**Ingest a PPTX deck:**
+
+```bash
+curl -X POST http://localhost:5000/rag/ingest-slides \
+  -F "file=@presentation.pptx" \
+  -F "file_type=pptx" \
+  -F "deck_id=my_custom_deck_id"
+```
+
+**Ingest a PDF deck:**
+
+```bash
+curl -X POST http://localhost:5000/rag/ingest-slides \
+  -F "file=@slides.pdf" \
+  -F "file_type=pdf"
+```
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "deck_id": "pptx_deck_a1b2c3d4",
+  "slides_processed": 15,
+  "slide_chunks": 15,
+  "window_chunks": 3,
+  "stored_count": 18,
+  "ocr_stats": {
+    "slides_ocred": 2,
+    "total_ocr_chars": 245
+  },
+  "warnings": []
+}
+```
+
+**Response Fields:**
+
+- `status`: Status of the operation ("ok" or "error")
+- `deck_id`: Unique identifier for the ingested deck
+- `slides_processed`: Number of slides/pages processed
+- `slide_chunks`: Number of slide chunks created (1 per slide)
+- `window_chunks`: Number of window chunks created (10 slides per window, ~30% overlap)
+- `stored_count`: Total chunks stored in ChromaDB
+- `ocr_stats`: OCR statistics object
+  - `slides_ocred`: Number of slides that were OCR'd
+  - `total_ocr_chars`: Total characters extracted via OCR
+- `warnings`: Array of warning messages (e.g., OCR unavailable)
+
+**Error Responses:**
+
+Missing file (400):
+
+```json
+{
+  "status": "error",
+  "error": "No file provided. Use 'file' field in multipart/form-data."
+}
+```
+
+Invalid file_type (400):
+
+```json
+{
+  "status": "error",
+  "error": "file_type must be 'pdf' or 'pptx'"
+}
+```
+
+Missing dependency (500):
+
+```json
+{
+  "status": "error",
+  "error": "Missing dependency: python-pptx is required for PPTX ingestion. Install with: pip install python-pptx"
+}
+```
+
+**How Slide Ingestion Works:**
+
+1. **Text Extraction**: 
+   - PPTX: Extracts text from text frames, preserves bullet structure, detects images
+   - PDF: Extracts text blocks and image references using PyMuPDF
+
+2. **OCR Decision**: Slides are OCR'd if native text is low (< 50 chars) AND slides have images, or if a large image dominates the slide (> 40% area). OCR is optional - ingestion succeeds without it but image-heavy slides may have missing text.
+
+3. **Chunking Strategy**:
+   - **Slide chunks**: One chunk per slide (precision) with metadata: `chunk_type: "slide"`, `deck_id`, `slide_number`, `slide_title`, `has_ocr`
+   - **Window chunks**: 10 slides per window, stride of 7 (30% overlap) for topic continuity, metadata: `chunk_type: "window"`, `deck_id`, `start_slide`, `end_slide`
+
+4. **Retrieval Enhancement**: When querying via `/rag/chat`, if a slide chunk is retrieved, the system automatically fetches neighboring slides (±1 by default) from the same deck for better context.
+
+**OCR Setup (Optional):**
+
+To enable OCR for image-heavy slides:
+
+```bash
+# Install system dependency (Ubuntu/Debian)
+sudo apt-get install tesseract-ocr
+
+# Install Python package
+pip install pytesseract
+```
+
+If OCR is not installed, ingestion will still work but with warnings for image-heavy slides.
+
+**Notes:**
+
+- Slide chunks are stored in the same ChromaDB collection as regular PDF chunks
+- The `/rag/chat` endpoint works with both slide chunks and page-based chunks
+- Neighbor expansion is enabled by default for slide chunks
+- Backward compatible: existing page-based ingestion (`/rag/ingest`) is unchanged
+
+---
+
 ## Test Results
 
 All example responses in this document were taken directly from actual test runs with:
