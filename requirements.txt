@@ -9,3 +9,11 @@ chromadb
 sentence-transformers
 groq
 langchain-text-splitters
+
+#Slide ingestion requirements
+python-pptx
+pymupdf
+Pillow
+
+#OCR (optional - requires system tesseract installation)
+#pytesseract  # Uncomment to enable OCR (requires: sudo apt-get install tesseract-ocr)
