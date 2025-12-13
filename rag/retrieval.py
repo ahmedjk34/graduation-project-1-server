@@ -132,6 +132,8 @@ def generate_answer(question: str, contexts: List[Dict]) -> Dict:
     # 2. Validate context is not empty
     if not contexts:
         return {"error": "No context retrieved for question."}
+
+    print("Question is: " , question , "\n\n")
     # 3. Build prompt with context and citation instructions
     messages = build_prompt(question, contexts)
     # 4. Call Groq API to generate answer
@@ -143,6 +145,7 @@ def generate_answer(question: str, contexts: List[Dict]) -> Dict:
         )
         # 5. Extract answer from response
         answer = resp.choices[0].message.content
+        print("Generated answer: ", answer)
         return {"answer": answer}
     except Exception as e:
         return {"error": f"Groq API error: {str(e)}"}
