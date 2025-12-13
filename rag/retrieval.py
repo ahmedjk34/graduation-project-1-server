@@ -51,8 +51,9 @@ logger = logging.getLogger(__name__)
 from groq import Groq
 from config import (
     CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL_NAME,
-    GROQ_API_KEY, GROQ_MODEL, CIRCUIT_TUTOR_SYSTEM_PROMPT
+    GROQ_API_KEY, GROQ_MODEL
 )
+from .prompts import CIRCUIT_TUTOR_SYSTEM_PROMPT, QUERY_EXPANSION_SYSTEM_PROMPT
 from .embeddings import LocalEmbeddingFunction
 
 # Initialize clients
@@ -73,10 +74,7 @@ def expand_query_via_groq(query: str, n: int = 4) -> List[str]:
         return []
     
     # 1. Build prompt for query reformulation
-    system_prompt = (
-        "Generate up to {n} concise, single-topic search reformulations for retrieving "
-        "relevant material about electrical/digital circuits. One per line, no numbering."
-    ).format(n=n)
+    system_prompt = QUERY_EXPANSION_SYSTEM_PROMPT.format(n=n)
     
     # 2. Call Groq to generate alternatives
     try:
