@@ -20,7 +20,7 @@ class TextBlock:
         self.text = text #the actual content
         self.bbox = bbox #the bounding box of the text block
         self.font_size = font_size #the font size of the text block [can be used later to estimate the importance of the text block, get an approximate idea of the importance of the text block, and text in it]
-
+        #Future me note: the font size can actually be used for title detection!
 
 # Represents an image block on a slide
 class ImageBlock:
