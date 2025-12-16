@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from groq import Groq
 from dotenv import load_dotenv
 import os
+from rag.prompts import GROQ_GENERAL_ASSISTANT_PROMPT
 
 load_dotenv()
 
@@ -15,15 +16,6 @@ else:
         client = None
 
 groq_bp = Blueprint('groq', __name__)
-
-CONTEXT = (
-    "You are a highly knowledgeable and helpful AI assistant specializing in digital and electronic circuit design, "
-    "debugging, and Q&A. You can provide detailed explanations, troubleshoot complex hardware and software problems, "
-    "suggest practical solutions, and answer questions about microcontrollers, FPGAs, PCB layout, analog/digital circuits, "
-    "signal integrity, power systems, embedded programming, tools, and best practices. "
-    "When answering, be clear, precise, and comprehensive. You may use diagrams, equations, or references to datasheets and standards when needed. "
-    "If the user asks for code, provide well-commented examples. If you are unsure, explain how the user might investigate further."
-)
 
 @groq_bp.route('/general-llm', methods=['POST'])
 def call_llm():
@@ -45,7 +37,7 @@ def call_llm():
     user_prompt = user_prompt.strip()
 
     messages = [
-        {"role": "system", "content": CONTEXT},
+        {"role": "system", "content": GROQ_GENERAL_ASSISTANT_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 
