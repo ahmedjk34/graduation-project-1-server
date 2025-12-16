@@ -5,7 +5,7 @@ from rag.ingest import ingest_directory
 from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client
 from rag.slide_ingest import ingest_pdf_deck, ingest_pptx_deck
 from rag.ocr_adapter import get_ocr_adapter
-from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt
+from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt, DECK_CHAT_SYSTEM_PROMPT
 
 from config import GROQ_MODEL
 
@@ -93,6 +93,103 @@ def rag_chat():
     except Exception as e:
         return jsonify({
             "error": "RAG pipeline failed",
+            "details": str(e)
+        }), 500
+
+
+# Deck-based chat endpoint - retrieves ALL slides from specified decks
+# and attaches them to every prompt (no semantic search/RAG)
+@rag_bp.route("/deck-chat", methods=["POST"])
+def deck_chat():
+    # 1. Validate request is JSON
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON."}), 400
+
+    # 2. Parse and validate parameters
+    data = request.get_json(silent=True) or {}
+    question = (data.get("question") or "").strip()
+    if not question:
+        return jsonify({
+            "error": "'question' must be non-empty."
+        }), 400
+    
+    deck_ids = data.get("deck_ids")
+    if not deck_ids:
+        return jsonify({"error": "'deck_ids' (array) is required."}), 400
+    
+    if not isinstance(deck_ids, list) or len(deck_ids) == 0:
+        return jsonify({"error": "'deck_ids' must be a non-empty array."}), 400
+
+    try:
+        # 3. Retrieve ALL slides from specified decks (no semantic search)
+        slides = get_all_slides_from_decks(deck_ids)
+        
+        if not slides:
+            return jsonify({
+                "error": f"No slides found for deck_ids: {deck_ids}"
+            }), 404
+        
+        # 4. Format slides into context string
+        slide_texts = []
+        for slide in slides:
+            slide_num = slide.get("slide_number", 0)
+            slide_title = slide.get("slide_title", "")
+            slide_text = slide.get("text", "")
+            deck_id = slide.get("deck_id", "")
+            slide_texts.append(f"--- DECK: {deck_id} | SLIDE {slide_num}: {slide_title} ---\n{slide_text}")
+        
+        all_slides_content = "\n\n".join(slide_texts)
+        
+        # 5. Build messages for Groq
+        if groq_client is None:
+            return jsonify({"error": "GROQ_API_KEY is missing or invalid."}), 500
+        
+        messages = [
+            {
+                "role": "system",
+                "content": DECK_CHAT_SYSTEM_PROMPT
+            },
+            {
+                "role": "system",
+                "content": f"SLIDE DECK CONTENT:\n\n{all_slides_content}"
+            },
+            {
+                "role": "user",
+                "content": question
+            }
+        ]
+        
+        # 6. Generate answer using Groq
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=0.2,
+        )
+        
+        answer = response.choices[0].message.content.strip()
+        
+        # 7. Format sources for response
+        sources = []
+        for slide in slides:
+            sources.append({
+                "source": slide.get("deck_id"),
+                "slide_number": slide.get("slide_number"),
+                "slide_title": slide.get("slide_title", ""),
+                "chunk_type": "slide"
+            })
+        
+        # 8. Return response
+        return jsonify({
+            "question": question,
+            "deck_ids": deck_ids,
+            "total_slides": len(slides),
+            "answer": answer,
+            "sources": sources
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            "error": "Deck chat failed",
             "details": str(e)
         }), 500
 

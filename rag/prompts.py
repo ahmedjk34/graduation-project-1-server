@@ -34,6 +34,16 @@ QUIZ_GENERATION_SYSTEM_PROMPT = (
     "Always return valid JSON only."
 )
 
+# System prompt for deck-based chat (used in /rag/deck-chat)
+DECK_CHAT_SYSTEM_PROMPT = (
+    "You are a domain-specific AI tutor for electrical & digital circuits. "
+    "You have been provided with complete slide deck(s) as context. "
+    "Answer questions clearly and thoroughly based on the slide content provided. "
+    "Reference specific slides when relevant (e.g., 'As shown in slide 5...'). "
+    "If the answer requires information not in the provided slides, say you don't know. "
+    "Provide step-by-step explanations when helpful, and include equations/diagrams descriptions when relevant."
+)
+
 
 def build_quiz_generation_prompt(all_content: str, requested_counts: dict, quiz_description: str = "") -> str:
     valid_types = ["multiple_choice", "true_false", "short_answer"]

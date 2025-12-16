@@ -258,7 +258,152 @@ Groq API error:
 
 ---
 
-### 4. Ingest Slide Decks (PDF/PPTX)
+### 4. Deck-Based Chat (No RAG)
+
+**Endpoint:** `POST /rag/deck-chat`
+
+**Description:** Chat endpoint that retrieves ALL slides from specified deck(s) and attaches them to every prompt. Unlike the RAG chat endpoint, this does NOT perform semantic search - it simply loads all slides from the deck(s) and includes them in the context for every question. Use this when you want to chat about specific slide decks without selective retrieval.
+
+**Request Body:**
+
+```json
+{
+  "question": "Explain the concept from slide 5", // Required
+  "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"] // Required: array of deck IDs
+}
+```
+
+**Parameters:**
+
+- `question` (required): The question to ask
+- `deck_ids` (required): Array of deck IDs to retrieve slides from (get these from `/rag/ingest-slides`)
+
+#### cURL Example
+
+```bash
+curl -X POST http://localhost:5000/rag/deck-chat \
+     -H "Content-Type: application/json" \
+     -d '{
+       "question": "What are the main topics covered in these slides?",
+       "deck_ids": ["pptx_deck_abc123"]
+     }'
+```
+
+#### Postman Example
+
+1. **Method:** `POST`
+2. **URL:** `http://localhost:5000/rag/deck-chat`
+3. **Headers:**
+   - `Content-Type: application/json`
+4. **Body (raw JSON):**
+   ```json
+   {
+     "question": "What are the main topics covered in these slides?",
+     "deck_ids": ["pptx_deck_abc123"]
+   }
+   ```
+
+**Response:**
+
+```json
+{
+  "question": "What are the main topics covered in these slides?",
+  "deck_ids": ["pptx_deck_abc123"],
+  "total_slides": 25,
+  "answer": "Based on the slide deck, the main topics covered include...",
+  "sources": [
+    {
+      "source": "pptx_deck_abc123",
+      "slide_number": 1,
+      "slide_title": "Introduction to Op-Amps",
+      "chunk_type": "slide"
+    },
+    {
+      "source": "pptx_deck_abc123",
+      "slide_number": 2,
+      "slide_title": "Basic Configurations",
+      "chunk_type": "slide"
+    }
+    // ... all slides from the deck(s)
+  ]
+}
+```
+
+**Response Fields:**
+
+- `question`: The original question asked
+- `deck_ids`: Array of deck IDs used
+- `total_slides`: Total number of slides loaded and attached to context
+- `answer`: The generated answer based on all slides in the deck(s)
+- `sources`: Array of all slides from the deck(s), each containing:
+  - `source`: The deck_id
+  - `slide_number`: Slide number
+  - `slide_title`: Title of the slide
+  - `chunk_type`: Always "slide"
+
+**Error Responses:**
+
+Missing question:
+
+```json
+{
+  "error": "'question' must be non-empty."
+}
+```
+
+Missing deck_ids:
+
+```json
+{
+  "error": "'deck_ids' (array) is required."
+}
+```
+
+Invalid deck_ids format:
+
+```json
+{
+  "error": "'deck_ids' must be a non-empty array."
+}
+```
+
+No slides found:
+
+```json
+{
+  "error": "No slides found for deck_ids: ['pptx_deck_abc123']"
+}
+```
+
+Groq API error:
+
+```json
+{
+  "error": "GROQ_API_KEY is missing or invalid."
+}
+```
+
+**Notes:**
+
+- **No RAG/Semantic Search**: This endpoint loads ALL slides from the specified deck(s) and attaches them to every prompt - no semantic search is performed
+- **Multiple Decks**: You can specify multiple deck_ids to combine slides from different decks
+- **Sequential Order**: Slides are sorted by deck_id and slide_number to maintain order
+- **Use Case**: Ideal for tutoring/Q&A sessions where you want to discuss a specific slide deck comprehensively
+- **Context Size**: Be mindful that large decks may hit token limits - consider splitting very large decks or using the regular `/rag/chat` endpoint for selective retrieval
+- **Get deck_ids**: Use the `/rag/ingest-slides` endpoint to upload decks and get their deck_ids
+
+**Comparison with /rag/chat:**
+
+| Feature   | /rag/chat                      | /rag/deck-chat                     |
+| --------- | ------------------------------ | ---------------------------------- |
+| Retrieval | Semantic search (RAG)          | All slides from deck(s)            |
+| Context   | Top-k relevant chunks          | All slides                         |
+| Use Case  | Broad knowledge base queries   | Deck-specific tutoring             |
+| Sources   | Mixed (pages, slides, windows) | Only slides from specified deck(s) |
+
+---
+
+### 5. Ingest Slide Decks (PDF/PPTX)
 
 **Endpoint:** `POST /rag/ingest-slides`
 
@@ -357,13 +502,15 @@ Missing dependency (500):
 
 **How Slide Ingestion Works:**
 
-1. **Text Extraction**: 
+1. **Text Extraction**:
+
    - PPTX: Extracts text from text frames, preserves bullet structure, detects images
    - PDF: Extracts text blocks and image references using PyMuPDF
 
 2. **OCR Decision**: Slides are OCR'd if native text is low (< 50 chars) AND slides have images, or if a large image dominates the slide (> 40% area). OCR is optional - ingestion succeeds without it but image-heavy slides may have missing text.
 
 3. **Chunking Strategy**:
+
    - **Slide chunks**: One chunk per slide (precision) with metadata: `chunk_type: "slide"`, `deck_id`, `slide_number`, `slide_title`, `has_ocr`
    - **Window chunks**: 10 slides per window, stride of 7 (30% overlap) for topic continuity, metadata: `chunk_type: "window"`, `deck_id`, `start_slide`, `end_slide`
 
@@ -393,7 +540,7 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 
 ---
 
-### 5. Generate Quiz from Slide Decks
+### 6. Generate Quiz from Slide Decks
 
 **Endpoint:** `POST /rag/generate-quiz`
 
@@ -403,8 +550,9 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 
 ```json
 {
-  "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"],  // Required: array of deck_ids
-  "question_counts": {                                    // Required: per-type counts
+  "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"], // Required: array of deck_ids
+  "question_counts": {
+    // Required: per-type counts
     "multiple_choice": 3,
     "short_answer": 2,
     "true_false": 2
@@ -482,12 +630,21 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
   "total_slides": 50,
   "question_count": 15,
   "question_type": "mixed",
-  "question_counts": { "multiple_choice": 3, "short_answer": 2, "true_false": 2 },
+  "question_counts": {
+    "multiple_choice": 3,
+    "short_answer": 2,
+    "true_false": 2
+  },
   "questions": [
     {
       "question_text": "What is the main concept discussed in slide 5?",
       "question_type": "multiple_choice",
-      "options": ["Option A text", "Option B text", "Option C text", "Option D text"],
+      "options": [
+        "Option A text",
+        "Option B text",
+        "Option C text",
+        "Option D text"
+      ],
       "correct_answer": "A",
       "points": 1,
       "order_index": 1,
@@ -528,7 +685,7 @@ The response format matches your `quiz_questions` table structure exactly. You c
 
 ```sql
 INSERT INTO quiz_questions (module_id, question_text, question_type, options, correct_answer, points, order_index, explanation)
-VALUES 
+VALUES
   (module_id_value, 'question_text', 'multiple_choice', '["Option A", "Option B", ...]'::jsonb, 'A', 1, 1, 'explanation'),
   ...
 ```
@@ -601,7 +758,7 @@ Groq API error (500):
 
 ---
 
-### 6. General LLM (Non-RAG)
+### 7. General LLM (Non-RAG)
 
 **Endpoint:** `POST /groq/general-llm`
 
@@ -611,7 +768,7 @@ Groq API error (500):
 
 ```json
 {
-  "prompt": "Explain how a transistor works"  // Required
+  "prompt": "Explain how a transistor works" // Required
 }
 ```
 
@@ -724,7 +881,7 @@ The response format matches your `quiz_questions` table. Insert with your `modul
 
 ```sql
 INSERT INTO quiz_questions (module_id, question_text, question_type, options, correct_answer, points, order_index, explanation)
-SELECT 
+SELECT
   'your-module-id',
   question_text,
   question_type,
@@ -861,11 +1018,11 @@ All example responses in this document were taken directly from actual test runs
 
 ## Summary of Endpoints
 
-| Endpoint | Method | Purpose | Input | Output |
-|----------|--------|---------|-------|--------|
-| `/health` | GET | Health check | None | "OK" |
-| `/rag/ingest` | POST | Ingest PDFs from directory | `data_dir` (optional) | Ingestion summary |
-| `/rag/chat` | POST | RAG-powered Q&A | `question`, `top_k`, `use_query_expansion` | Answer + sources |
-| `/rag/ingest-slides` | POST | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional) | `deck_id` + stats |
-| `/rag/generate-quiz` | POST | Generate quiz from slides | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready) |
-| `/groq/general-llm` | POST | Direct LLM query (no RAG) | `prompt` | LLM response |
+| Endpoint             | Method | Purpose                      | Input                                             | Output                    |
+| -------------------- | ------ | ---------------------------- | ------------------------------------------------- | ------------------------- |
+| `/health`            | GET    | Health check                 | None                                              | "OK"                      |
+| `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary         |
+| `/rag/chat`          | POST   | RAG-powered Q&A              | `question`, `top_k`, `use_query_expansion`        | Answer + sources          |
+| `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats         |
+| `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready) |
+| `/groq/general-llm`  | POST   | Direct LLM query (no RAG)    | `prompt`                                          | LLM response              |
