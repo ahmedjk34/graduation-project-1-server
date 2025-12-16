@@ -1,9 +1,16 @@
 # server/routes/rag.py
 from flask import Blueprint, request, jsonify
+
 from rag.ingest import ingest_directory
-from rag.retrieval import retrieve_context, generate_answer
+from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client
 from rag.slide_ingest import ingest_pdf_deck, ingest_pptx_deck
 from rag.ocr_adapter import get_ocr_adapter
+from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt
+
+from config import GROQ_MODEL
+
+import json
+import re
 
 
 rag_bp = Blueprint("rag", __name__)
@@ -204,23 +211,44 @@ def generate_quiz():
     if not isinstance(deck_ids, list) or len(deck_ids) == 0:
         return jsonify({"error": "'deck_ids' must be a non-empty array."}), 400
     
-    question_count = int(data.get("question_count", 10))
-    question_type = data.get("question_type", "multiple_choice")
     quiz_description = data.get("quiz_description", "")
-    
-    # 3. Validate question_type
+
+    # 3. Parse/validate per-type question counts (required).
+    # Expected shape:
+    #   { "question_counts": { "multiple_choice": 3, "short_answer": 2, "true_false": 2 } }
     valid_types = ["multiple_choice", "true_false", "short_answer"]
-    if question_type not in valid_types:
-        return jsonify({
-            "error": f"'question_type' must be one of: {', '.join(valid_types)}"
-        }), 400
+    question_counts = data.get("question_counts")
+    if question_counts is None:
+        return jsonify({"error": "'question_counts' is required (object mapping question types to counts)."}), 400
+    if not isinstance(question_counts, dict):
+        return jsonify({"error": "'question_counts' must be an object mapping question types to counts."}), 400
+
+    requested_counts = {}
+    for qt, cnt in question_counts.items():
+        if qt not in valid_types:
+            return jsonify({
+                "error": f"Invalid question type '{qt}'. Must be one of: {', '.join(valid_types)}"
+            }), 400
+        
+        # Parse and validate count
+        if cnt is None or isinstance(cnt, bool):
+            parsed = None
+        else:
+            try:
+                parsed = int(cnt)
+                if parsed < 0:
+                    parsed = None
+            except Exception:
+                parsed = None
+        
+        if parsed is None:
+            return jsonify({"error": f"Count for '{qt}' must be a non-negative integer."}), 400
+        requested_counts[qt] = parsed
+    if not requested_counts or all(v == 0 for v in requested_counts.values()):
+        return jsonify({"error": "'question_counts' must request at least one question (> 0)."}), 400
     
     try:
-        from rag.retrieval import get_all_slides_from_decks, groq_client
-        from config import GROQ_MODEL
-        import json
-        import re
-        
+
         # 4. Get all slides from all specified decks
         slides = get_all_slides_from_decks(deck_ids)
         
@@ -240,70 +268,12 @@ def generate_quiz():
         
         all_content = "\n\n".join(slide_texts)
         
-        # 6. Build prompt based on question type
-        if question_type == "multiple_choice":
-            question_format = """For each question, provide:
-- question_text: The question text
-- options: JSON array of exactly 4 options (e.g., ["Option A text", "Option B text", "Option C text", "Option D text"])
-- correct_answer: The letter of the correct answer ("A", "B", "C", or "D")
-- explanation: Brief explanation (1-2 sentences) of why this answer is correct"""
-            
-            example = """{
-      "question_text": "What is the main topic discussed in the slides?",
-      "options": ["Option A text", "Option B text", "Option C text", "Option D text"],
-      "correct_answer": "A",
-      "explanation": "This is correct because..."
-    }"""
-        
-        elif question_type == "true_false":
-            question_format = """For each question, provide:
-- question_text: The statement (should be clearly true or false)
-- options: JSON array with exactly 2 options: ["True", "False"]
-- correct_answer: Either "true" or "false" (lowercase)
-- explanation: Brief explanation (1-2 sentences) of why this answer is correct"""
-            
-            example = """{
-      "question_text": "The concept discussed in slide 5 is fundamental to understanding the topic.",
-      "options": ["True", "False"],
-      "correct_answer": "true",
-      "explanation": "This is correct because..."
-    }"""
-        
-        else:  # short_answer
-            question_format = """For each question, provide:
-- question_text: The question text
-- options: null (not used for short answer)
-- correct_answer: The expected answer text
-- explanation: Brief explanation (1-2 sentences) of the answer"""
-            
-            example = """{
-      "question_text": "What is the main concept introduced in slide 3?",
-      "options": null,
-      "correct_answer": "The main concept is...",
-      "explanation": "This is correct because..."
-    }"""
-        
-        # 7. Build quiz generation prompt
-        description_note = f"\n\nAdditional Instructions: {quiz_description}" if quiz_description else ""
-        
-        quiz_prompt = f"""Generate {question_count} {question_type.replace('_', ' ')} quiz questions based on the following slide deck content.
-
-Requirements:
-- Questions should cover different topics from the slides
-- Questions should be clear and unambiguous
-- {question_format}
-- Include both factual recall and comprehension questions when possible
-{description_note}
-
-Return ONLY valid JSON in this exact format (no markdown, no code blocks):
-{{
-  "questions": [
-    {example}
-  ]
-}}
-
-Slide Deck Content:
-{all_content}"""
+        # 6. Build quiz generation prompt
+        quiz_prompt = build_quiz_generation_prompt(
+            all_content=all_content,
+            requested_counts=requested_counts,
+            quiz_description=quiz_description,
+        )
         
         # 8. Call Groq to generate quiz
         if groq_client is None:
@@ -312,7 +282,7 @@ Slide Deck Content:
         messages = [
             {
                 "role": "system",
-                "content": "You are an expert quiz generator. Generate clear, accurate quiz questions based on the provided content. Always return valid JSON only."
+                "content": QUIZ_GENERATION_SYSTEM_PROMPT
             },
             {
                 "role": "user",
@@ -347,38 +317,63 @@ Slide Deck Content:
         if "questions" not in quiz_json:
             return jsonify({
                 "error": "Invalid quiz format: missing 'questions' field",
-                "raw_response": quiz_text[:500]
+                "raw_response": quiz_text
             }), 500
-        
-        # 11. Transform to database-ready format
-        # Add order_index and points to each question
+
+        raw_questions = quiz_json.get("questions", [])
+        if not isinstance(raw_questions, list):
+            return jsonify({
+                "error": "Invalid quiz format: 'questions' must be an array",
+                "raw_response": quiz_text
+            }), 500
+        # 11. Minimal sanity checks (frontend/LLM are expected to follow the prompt).
+        total_requested = sum(v for v in requested_counts.values() if v > 0)
+        if len(raw_questions) != total_requested:
+            return jsonify({
+                "error": "LLM returned unexpected number of questions.",
+                "expected": total_requested,
+                "got": len(raw_questions),
+                "raw_response": quiz_text
+            }), 502
+
+        for i, q in enumerate(raw_questions):
+            if not isinstance(q, dict):
+                return jsonify({"error": f"Invalid question at index {i}: must be an object."}), 502
+            qt = q.get("question_type")
+            if qt not in valid_types:
+                return jsonify({"error": f"Invalid question_type at index {i}: {qt}"}), 502
+
         formatted_questions = []
-        for idx, q in enumerate(quiz_json.get("questions", []), start=1):
-            formatted_q = {
+        for idx, q in enumerate(raw_questions, start=1):
+            formatted_questions.append({
                 "question_text": q.get("question_text", ""),
-                "question_type": question_type,
-                "options": q.get("options"),  # JSONB - can be array or null
+                "question_type": q.get("question_type", ""),
+                "options": q.get("options"),
                 "correct_answer": q.get("correct_answer", ""),
-                "points": 1,  # Default, can be customized
+                "points": 1, #will be overriden in front-end
                 "order_index": idx,
-                "explanation": q.get("explanation", "")
-            }
-            formatted_questions.append(formatted_q)
-        
+                "explanation": q.get("explanation", ""),
+            })
+
+        response_question_type = "mixed"
+        nonzero_types = [k for k, v in requested_counts.items() if v > 0]
+        if len(nonzero_types) == 1:
+            response_question_type = nonzero_types[0]
+
         # 12. Return quiz in database-ready format
         return jsonify({
             "deck_ids": deck_ids,
             "total_slides": len(slides),
             "question_count": len(formatted_questions),
-            "question_type": question_type,
+            "question_type": response_question_type,
+            "question_counts": requested_counts,
             "questions": formatted_questions
         }), 200
     
     except json.JSONDecodeError as e:
         return jsonify({
             "error": f"Failed to parse quiz JSON: {str(e)}",
-            "raw_response": quiz_text[:500] if 'quiz_text' in locals() else "N/A"
+            "raw_response": quiz_text if 'quiz_text' in locals() else "N/A"
         }), 500
     except Exception as e:
         return jsonify({"error": f"Quiz generation failed: {str(e)}"}), 500
-

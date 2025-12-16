@@ -27,3 +27,72 @@ QUERY_EXPANSION_SYSTEM_PROMPT = (
     "Generate up to {n} concise, single-topic search reformulations for retrieving "
     "relevant material about electrical/digital circuits. One per line, no numbering."
 )
+
+# System prompt for quiz generation (used in /rag/generate-quiz)
+QUIZ_GENERATION_SYSTEM_PROMPT = (
+    "You are an expert quiz generator. Generate clear, accurate quiz questions based on the provided content. "
+    "Always return valid JSON only."
+)
+
+
+def build_quiz_generation_prompt(all_content: str, requested_counts: dict, quiz_description: str = "") -> str:
+    valid_types = ["multiple_choice", "true_false", "short_answer"]
+    counts_line = ", ".join([f"{qt}: {requested_counts[qt]}" for qt in valid_types if qt in requested_counts])
+    total_requested = sum(int(v) for v in requested_counts.values())
+
+    question_format = """Each item in "questions" MUST be one of these shapes:
+
+1) multiple_choice:
+{
+  "question_type": "multiple_choice",
+  "question_text": "…",
+  "options": ["…", "…", "…", "…"],
+  "correct_answer": "A" | "B" | "C" | "D",
+  "explanation": "…"
+}
+
+2) true_false:
+{
+  "question_type": "true_false",
+  "question_text": "…",
+  "options": ["True", "False"],
+  "correct_answer": "true" | "false",
+  "explanation": "…"
+}
+
+3) short_answer:
+{
+  "question_type": "short_answer",
+  "question_text": "…",
+  "options": null,
+  "correct_answer": "…",
+  "explanation": "…"
+}"""
+
+    description_note = f"\n\nAdditional Instructions: {quiz_description}" if quiz_description else ""
+
+    return f"""Generate a quiz with EXACTLY these question counts: {counts_line}. Total questions: {total_requested}.
+
+Requirements:
+- Questions should cover different topics from the slides
+- Questions should be clear and unambiguous
+- {question_format}
+- Include both factual recall and comprehension questions when possible
+- Do NOT include any extra keys besides: question_type, question_text, options, correct_answer, explanation
+{description_note}
+
+Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+{{
+  "questions": [
+    {{
+      "question_type": "multiple_choice",
+      "question_text": "Example question?",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correct_answer": "A",
+      "explanation": "Example explanation."
+    }}
+  ]
+}}
+
+Slide Deck Content:
+{all_content}"""

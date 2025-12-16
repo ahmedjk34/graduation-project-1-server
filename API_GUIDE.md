@@ -404,8 +404,11 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 ```json
 {
   "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"],  // Required: array of deck_ids
-  "question_count": 15,                                   // Optional: number of questions (default: 10)
-  "question_type": "multiple_choice",                     // Optional: "multiple_choice" | "true_false" | "short_answer" (default: "multiple_choice")
+  "question_counts": {                                    // Required: per-type counts
+    "multiple_choice": 3,
+    "short_answer": 2,
+    "true_false": 2
+  },
   "quiz_description": "Focus on concepts from slides 1-10" // Optional: custom instructions for AI
 }
 ```
@@ -413,12 +416,9 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 **Parameters:**
 
 - `deck_ids` (required): Array of deck IDs from previously ingested slide decks
-- `question_count` (optional): Number of questions to generate (default: 10)
-- `question_type` (optional): Type of questions to generate. Must be one of:
-  - `"multiple_choice"`: 4 multiple choice options (A, B, C, D)
-  - `"true_false"`: True/False questions
-  - `"short_answer"`: Short answer questions (no multiple choice options)
-  - Default: `"multiple_choice"`
+- `question_counts` (required): Object mapping question types to counts. Example:
+  - `{ "multiple_choice": 3, "short_answer": 2, "true_false": 2 }`
+  - Counts must be non-negative integers; at least one must be > 0
 - `quiz_description` (optional): Custom instructions for the AI, such as:
   - `"Focus on concepts from slides 1-10"`
   - `"Emphasize practical applications"`
@@ -427,6 +427,18 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 
 #### cURL Examples
 
+**Generate a mixed-type quiz (recommended):**
+
+```bash
+curl -X POST http://localhost:5000/rag/generate-quiz \
+  -H "Content-Type: application/json" \
+  -d '{
+    "deck_ids": ["pptx_deck_abc123"],
+    "question_counts": { "multiple_choice": 3, "short_answer": 2, "true_false": 2 },
+    "quiz_description": "Cover the whole deck and vary difficulty"
+  }'
+```
+
 **Generate multiple choice quiz from multiple decks:**
 
 ```bash
@@ -434,8 +446,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
   -H "Content-Type: application/json" \
   -d '{
     "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"],
-    "question_count": 15,
-    "question_type": "multiple_choice",
+    "question_counts": { "multiple_choice": 15 },
     "quiz_description": "Focus on concepts from slides 1-10, emphasize practical applications"
   }'
 ```
@@ -447,8 +458,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
   -H "Content-Type: application/json" \
   -d '{
     "deck_ids": ["pptx_deck_abc123"],
-    "question_count": 10,
-    "question_type": "true_false"
+    "question_counts": { "true_false": 10 }
   }'
 ```
 
@@ -459,8 +469,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
   -H "Content-Type: application/json" \
   -d '{
     "deck_ids": ["pdf_deck_xyz789"],
-    "question_count": 5,
-    "question_type": "short_answer",
+    "question_counts": { "short_answer": 5 },
     "quiz_description": "Focus on definitions and key concepts"
   }'
 ```
@@ -472,7 +481,8 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
   "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"],
   "total_slides": 50,
   "question_count": 15,
-  "question_type": "multiple_choice",
+  "question_type": "mixed",
+  "question_counts": { "multiple_choice": 3, "short_answer": 2, "true_false": 2 },
   "questions": [
     {
       "question_text": "What is the main concept discussed in slide 5?",
@@ -501,13 +511,14 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
 - `deck_ids`: Array of deck IDs used for quiz generation
 - `total_slides`: Total number of slides retrieved from all decks
 - `question_count`: Number of questions generated
-- `question_type`: Type of questions generated
+- `question_type`: `"mixed"` when multiple types were requested, otherwise the single requested type
+- `question_counts`: Object showing the requested per-type counts
 - `questions`: Array of question objects, each containing:
   - `question_text`: The question text
-  - `question_type`: Same as request parameter
+  - `question_type`: The question’s type (`multiple_choice` / `true_false` / `short_answer`)
   - `options`: For multiple choice: array of 4 option strings. For true/false: `["True", "False"]`. For short answer: `null`
   - `correct_answer`: For multiple choice: `"A"`, `"B"`, `"C"`, or `"D"`. For true/false: `"true"` or `"false"` (lowercase). For short answer: the answer text
-  - `points`: Points value (default: 1)
+  - `points`: Points value (default: 1). Frontend can override this per question to support custom grading.
   - `order_index`: Question order (1, 2, 3, ...)
   - `explanation`: Brief explanation (1-2 sentences) of the answer
 
@@ -540,11 +551,11 @@ Invalid deck_ids format (400):
 }
 ```
 
-Invalid question_type (400):
+Missing question_counts (400):
 
 ```json
 {
-  "error": "'question_type' must be one of: multiple_choice, true_false, short_answer"
+  "error": "'question_counts' is required (object mapping question types to counts)."
 }
 ```
 
@@ -702,8 +713,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
   -H "Content-Type: application/json" \
   -d '{
     "deck_ids": ["pptx_deck_abc123"],
-    "question_count": 10,
-    "question_type": "multiple_choice",
+    "question_counts": { "multiple_choice": 10 },
     "quiz_description": "Focus on key concepts"
   }'
 ```
@@ -857,5 +867,5 @@ All example responses in this document were taken directly from actual test runs
 | `/rag/ingest` | POST | Ingest PDFs from directory | `data_dir` (optional) | Ingestion summary |
 | `/rag/chat` | POST | RAG-powered Q&A | `question`, `top_k`, `use_query_expansion` | Answer + sources |
 | `/rag/ingest-slides` | POST | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional) | `deck_id` + stats |
-| `/rag/generate-quiz` | POST | Generate quiz from slides | `deck_ids`, `question_count`, `question_type`, `quiz_description` | Quiz questions (DB-ready) |
+| `/rag/generate-quiz` | POST | Generate quiz from slides | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready) |
 | `/groq/general-llm` | POST | Direct LLM query (no RAG) | `prompt` | LLM response |
