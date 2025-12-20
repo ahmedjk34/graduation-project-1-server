@@ -1025,4 +1025,48 @@ All example responses in this document were taken directly from actual test runs
 | `/rag/chat`          | POST   | RAG-powered Q&A              | `question`, `top_k`, `use_query_expansion`        | Answer + sources          |
 | `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats         |
 | `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready) |
+| `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`      |
 | `/groq/general-llm`  | POST   | Direct LLM query (no RAG)    | `prompt`                                          | LLM response              |
+
+---
+
+## Auto-Grade Submission
+
+**Endpoint:** `POST /autograde/grade`
+
+**Description:** Downloads assignment/submission attachments (PDF or PPTX), extracts text (OCR when enabled), and uses Groq to return a numeric grade and feedback.
+
+**Request Body:**
+
+```json
+{
+  "max_points": 10,
+  "submission_id": "sub_123",
+  "description": "Optional",
+  "instructions": "Optional",
+  "assignment_attachment_url": "https://<project>.supabase.co/storage/v1/object/public/.../assignment.pdf",
+  "content": "Optional submission text",
+  "submission_attachment_url": "https://<project>.supabase.co/storage/v1/object/public/.../submission.pdf"
+}
+```
+
+**Validation Rules:**
+
+- `max_points` and `submission_id` are required
+- `content` and `submission_attachment_url` cannot both be empty
+- `assignment_attachment_url`, `description`, and `instructions` cannot all be empty
+
+**Response:**
+
+```json
+{
+  "grade": 7,
+  "feedback": "..."
+}
+```
+
+**Notes:**
+
+- URLs are normalized and `?download=assignment|submition` is appended automatically.
+- Attachments can be PDF or PPTX (file type is inferred from downloaded bytes).
+- OCR is best-effort. To enable OCR for scanned PDFs/images, install `pytesseract` and the system `tesseract-ocr` binary.

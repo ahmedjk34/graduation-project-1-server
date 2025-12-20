@@ -2,11 +2,13 @@ from flask import Flask
 from flask_cors import CORS
 from routes.groq import groq_bp
 from routes.rag import rag_bp
+from routes.autograde import autograde_bp
 
 app = Flask(__name__)
 CORS(app) 
 app.register_blueprint(groq_bp, url_prefix='/groq')
 app.register_blueprint(rag_bp, url_prefix='/rag')
+app.register_blueprint(autograde_bp, url_prefix='/autograde')
 
 
 @app.route('/health')
