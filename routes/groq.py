@@ -1,19 +1,9 @@
 from flask import Blueprint, request, jsonify
-from groq import Groq
-from dotenv import load_dotenv
-import os
+from config import GROQ_API_KEY
 from rag.prompts import GROQ_GENERAL_ASSISTANT_PROMPT
+from utils.llm_utils import create_groq_client
 
-load_dotenv()
-
-api_key = os.environ.get("GROQ_API_KEY")
-if not api_key:
-    client = None
-else:
-    try:
-        client = Groq(api_key=api_key)
-    except Exception:
-        client = None
+client = create_groq_client(GROQ_API_KEY)
 
 groq_bp = Blueprint('groq', __name__)
 

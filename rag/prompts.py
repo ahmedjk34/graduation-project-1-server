@@ -45,6 +45,37 @@ DECK_CHAT_SYSTEM_PROMPT = (
 )
 
 
+# System prompt for auto-grading (used in /autograde/grade)
+AUTOGRADE_SYSTEM_PROMPT = (
+    "You are an automated assignment grader. "
+    "Grade the submission strictly against the assignment benchmark. "
+    "Return ONLY valid JSON with keys: grade (number) and feedback (string). "
+    "grade must be an integer between 0 and max_points. "
+    "If requirements are unclear or information is missing, explain that in feedback and grade conservatively."
+)
+
+
+def build_autograde_user_prompt(
+    *,
+    benchmark_text: str,
+    submission_text: str,
+    max_points: int,
+    submission_id: str | None = None,
+) -> str:
+    sid_line = f"SUBMISSION_ID: {submission_id}\n" if submission_id else ""
+    return (
+        f"{sid_line}"
+        f"MAX_POINTS: {max_points}\n\n"
+        "ASSIGNMENT_BENCHMARK (assignment PDF text + description + instructions):\n"
+        f"{benchmark_text}\n\n"
+        "SUBMISSION (student content + submission PDF text):\n"
+        f"{submission_text}\n\n"
+        "Return JSON only in this exact format:\n"
+        '{"grade": 0, "feedback": "..." }'
+    )
+
+
+
 def build_quiz_generation_prompt(all_content: str, requested_counts: dict, quiz_description: str = "") -> str:
     valid_types = ["multiple_choice", "true_false", "short_answer"]
     counts_line = ", ".join([f"{qt}: {requested_counts[qt]}" for qt in valid_types if qt in requested_counts])

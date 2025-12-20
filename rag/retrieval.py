@@ -48,16 +48,16 @@ import logging
 import chromadb
 
 logger = logging.getLogger(__name__)
-from groq import Groq
 from config import (
     CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL_NAME,
     GROQ_API_KEY, GROQ_MODEL
 )
 from .prompts import CIRCUIT_TUTOR_SYSTEM_PROMPT, QUERY_EXPANSION_SYSTEM_PROMPT
 from .embeddings import LocalEmbeddingFunction
+from utils.llm_utils import create_groq_client
 
 # Initialize clients
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+groq_client = create_groq_client(GROQ_API_KEY)
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 
 # Get or create collection
@@ -278,6 +278,15 @@ def get_all_slides_from_decks(deck_ids: List[str]) -> List[Dict]:
     # 3. Sort by deck_id then slide number to maintain order
     all_slides.sort(key=lambda x: (x.get("deck_id", ""), x.get("slide_number", 0)))
     return all_slides
+
+
+def build_slides_context(slides: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for slide in slides:
+        text = (slide.get("text") or "").strip()
+        if text:
+            parts.append(text)
+    return "\n\n---\n\n".join(parts).strip()
 
 
 # Formats contexts into prompt for Groq

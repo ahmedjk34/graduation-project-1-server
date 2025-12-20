@@ -262,6 +262,31 @@ def apply_ocr_to_slide(slide: SlideData, ocr_adapter: Optional[OCRAdapter]) -> L
     return ocr_blocks
 
 
+def apply_ocr_to_slides(slides: List[SlideData], ocr_adapter: Optional[OCRAdapter]) -> Dict[str, int]:
+    ocr_stats = {"slides_ocred": 0, "total_ocr_chars": 0}
+    if ocr_adapter is None:
+        return ocr_stats
+
+    for slide in slides:
+        if should_ocr_slide(slide):
+            ocr_blocks = apply_ocr_to_slide(slide, ocr_adapter)
+            if ocr_blocks:
+                slide.ocr_text_blocks = ocr_blocks
+                ocr_stats["slides_ocred"] += 1
+                ocr_stats["total_ocr_chars"] += sum(len(block.text) for block in ocr_blocks)
+
+    return ocr_stats
+
+
+def build_deck_text(slides: List[SlideData]) -> str:
+    parts: List[str] = []
+    for slide in slides:
+        canonical_text = build_canonical_slide_text(slide)
+        if canonical_text.strip():
+            parts.append(canonical_text)
+    return "\n\n---\n\n".join(parts).strip()
+
+
 # Finds the slide title from text blocks
 # Uses heuristic: largest font size near top
 def detect_slide_title(text_blocks: List[TextBlock]) -> Optional[str]:
@@ -461,14 +486,7 @@ def ingest_pdf_deck(file_bytes: bytes, deck_id: Optional[str] = None,
     logger.info(f"Loaded {len(slides)} slides from PDF")
     
     # 2. Apply OCR where needed
-    ocr_stats = {"slides_ocred": 0, "total_ocr_chars": 0}
-    for slide in slides:
-        if should_ocr_slide(slide):
-            ocr_blocks = apply_ocr_to_slide(slide, ocr_adapter)
-            if ocr_blocks:
-                slide.ocr_text_blocks = ocr_blocks
-                ocr_stats["slides_ocred"] += 1
-                ocr_stats["total_ocr_chars"] += sum(len(block.text) for block in ocr_blocks)
+    ocr_stats = apply_ocr_to_slides(slides, ocr_adapter)
     
     # 3. Build chunks
     slide_chunks = build_slide_chunks(slides, deck_id)
@@ -545,19 +563,12 @@ def ingest_pptx_deck(file_bytes: bytes, deck_id: Optional[str] = None,
     logger.info(f"Loaded {len(slides)} slides from PPTX")
     
     # 2. Apply OCR
-    ocr_stats = {"slides_ocred": 0, "total_ocr_chars": 0}
     warnings = []
     
     if ocr_adapter is None:
         warnings.append("OCR adapter not available - image-heavy slides may have missing text")
     
-    for slide in slides:
-        if should_ocr_slide(slide):
-            ocr_blocks = apply_ocr_to_slide(slide, ocr_adapter)
-            if ocr_blocks:
-                slide.ocr_text_blocks = ocr_blocks
-                ocr_stats["slides_ocred"] += 1
-                ocr_stats["total_ocr_chars"] += sum(len(block.text) for block in ocr_blocks)
+    ocr_stats = apply_ocr_to_slides(slides, ocr_adapter)
     
     # 3. Build chunks
     slide_chunks = build_slide_chunks(slides, deck_id)

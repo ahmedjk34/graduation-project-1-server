@@ -2,15 +2,13 @@
 from flask import Blueprint, request, jsonify
 
 from rag.ingest import ingest_directory
-from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client
+from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client, build_slides_context
 from rag.slide_ingest import ingest_pdf_deck, ingest_pptx_deck
 from rag.ocr_adapter import get_ocr_adapter
 from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt, DECK_CHAT_SYSTEM_PROMPT
+from utils.llm_utils import extract_json_object
 
 from config import GROQ_MODEL
-
-import json
-import re
 
 
 rag_bp = Blueprint("rag", __name__)
@@ -130,15 +128,7 @@ def deck_chat():
             }), 404
         
         # 4. Format slides into context string
-        slide_texts = []
-        for slide in slides:
-            slide_num = slide.get("slide_number", 0)
-            slide_title = slide.get("slide_title", "")
-            slide_text = slide.get("text", "")
-            deck_id = slide.get("deck_id", "")
-            slide_texts.append(f"--- DECK: {deck_id} | SLIDE {slide_num}: {slide_title} ---\n{slide_text}")
-        
-        all_slides_content = "\n\n".join(slide_texts)
+        all_slides_content = build_slides_context(slides)
         
         # 5. Build messages for Groq
         if groq_client is None:
@@ -355,15 +345,7 @@ def generate_quiz():
             }), 404
         
         # 5. Format all slides into context for LLM
-        slide_texts = []
-        for slide in slides:
-            slide_num = slide.get("slide_number", 0)
-            slide_title = slide.get("slide_title", "")
-            slide_text = slide.get("text", "")
-            deck_id = slide.get("deck_id", "")
-            slide_texts.append(f"--- DECK: {deck_id} | SLIDE {slide_num}: {slide_title} ---\n{slide_text}")
-        
-        all_content = "\n\n".join(slide_texts)
+        all_content = build_slides_context(slides)
         
         # 6. Build quiz generation prompt
         quiz_prompt = build_quiz_generation_prompt(
@@ -395,20 +377,14 @@ def generate_quiz():
         
         quiz_text = response.choices[0].message.content.strip()
         
-        # 9. Parse JSON from response (clean up if needed)
-        quiz_text = re.sub(r'```json\s*', '', quiz_text)
-        quiz_text = re.sub(r'```\s*', '', quiz_text)
-        quiz_text = quiz_text.strip()
-        
+        # 9. Parse JSON from response
         try:
-            quiz_json = json.loads(quiz_text)
-        except json.JSONDecodeError:
-            # Try to find JSON object in response
-            json_match = re.search(r'\{.*\}', quiz_text, re.DOTALL)
-            if json_match:
-                quiz_json = json.loads(json_match.group())
-            else:
-                raise ValueError("No valid JSON found in LLM response")
+            quiz_json = extract_json_object(quiz_text)
+        except Exception as e:
+            return jsonify({
+                "error": f"Failed to parse quiz JSON: {str(e)}",
+                "raw_response": quiz_text
+            }), 500
         
         # 10. Validate structure
         if "questions" not in quiz_json:
@@ -467,10 +443,5 @@ def generate_quiz():
             "questions": formatted_questions
         }), 200
     
-    except json.JSONDecodeError as e:
-        return jsonify({
-            "error": f"Failed to parse quiz JSON: {str(e)}",
-            "raw_response": quiz_text if 'quiz_text' in locals() else "N/A"
-        }), 500
     except Exception as e:
         return jsonify({"error": f"Quiz generation failed: {str(e)}"}), 500
