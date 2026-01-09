@@ -16,4 +16,31 @@ pymupdf
 Pillow
 
 #OCR (optional - requires system tesseract installation)
-#pytesseract  # Uncomment to enable OCR (requires: sudo apt-get install tesseract-ocr)
+pytesseract  # Requires system tesseract (e.g. sudo apt-get install tesseract-ocr)
+
+
+
+# Install build tools and ngspice dependencies
+# sudo apt update
+# sudo apt install -y \
+#   build-essential \
+#   autoconf automake libtool \
+#   flex bison \
+#   libx11-dev libxaw7-dev \
+#   libreadline-dev libfftw3-dev \
+#   libxmu-dev libxext-dev libxt-dev \
+#   pkg-config wget
+
+# # Download and build ngspice 31 with shared library
+# cd /tmp
+# wget https://sourceforge.net/projects/ngspice/files/ng-spice-rework/old-releases/31/ngspice-31.tar.gz -O ngspice-31.tar.gz
+# tar -xzf ngspice-31.tar.gz
+# cd ngspice-31
+# ./configure --with-ngshared --enable-xspice --enable-cider --enable-openmp --prefix=/usr/local
+# make -j$(nproc)
+# sudo make install
+# sudo ldconfig
+
+# # Set library path permanently
+# echo 'export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
+# source ~/.bashrc
