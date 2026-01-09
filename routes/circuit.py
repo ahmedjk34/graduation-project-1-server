@@ -5,7 +5,7 @@ import PySpice.Logging.Logging as Logging
 import PySpice.Spice.Simulation
 import sys
 
-from pyspice.simulator import create_circuit
+from pyspice.simulator import create_circuit, simulate_circuit
 
 if sys.platform == "linux" or sys.platform == "linux2":
     PySpice.Spice.Simulation.CircuitSimulator.DEFAULT_SIMULATOR = 'ngspice-shared'
@@ -27,10 +27,8 @@ def simulate():
     if not circuit:
         return jsonify({"error": "Circuit is required."}), 400
    
-    # Create circuit
     circuit = create_circuit(circuit)
 
-    print(circuit)
+    simulation_results = simulate_circuit(circuit)
 
-    # Return results
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok"} , simulation_results), 200

@@ -5,7 +5,7 @@ from PySpice.Spice.Netlist import Circuit
 from PySpice.Unit import *
 
 from .data import diode_models, transistor_models
-
+from .util import format_analysis
 
 def create_circuit(circuit_data: Dict) -> Circuit:
     """
@@ -89,3 +89,19 @@ def create_circuit(circuit_data: Dict) -> Circuit:
         circuit.BJT(name, collector, base, emitter, model=model_name)
     
     return circuit
+
+
+def simulate_circuit(circuit: Circuit) -> Dict:
+    """
+    Simulate a PySpice circuit and return the results.
+    
+    Args:
+        circuit: PySpice Circuit object
+    
+    Returns:
+        Dict: Dictionary containing the simulation results [we format it however we want]
+    """
+    simulator = circuit.simulator(temperature=25, nominal_temperature=25)
+    analysis = simulator.operating_point()
+
+    return format_analysis(analysis)
