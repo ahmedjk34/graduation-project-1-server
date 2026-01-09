@@ -40,16 +40,18 @@ def format_analysis(
         raise ValueError('Must pass a completed analysis')
 
     res = {}
-
-    # Include node voltagess
+    
+    # Include node voltages in a nested structure
+    node_voltages = {}
     for node, waveform in analysis.nodes.items():
-        res[node] = cast_waveform(waveform) if cast else waveform
+        node_voltages[node] = cast_waveform(waveform) if cast else waveform
+    res['node_voltages'] = node_voltages
 
     # Include time if it exists
     if hasattr(analysis, 'time'):
         res['time'] = cast_waveform(analysis.time) if cast else analysis.time
 
-    # Include time if it exists
+    # Include frequency if it exists
     if hasattr(analysis, 'frequency'):
         res['frequency'] = cast_waveform(analysis.frequency) if cast else analysis.frequency
 
