@@ -78,15 +78,15 @@ def create_circuit(circuit_data: Dict) -> Circuit:
         emitter = get_node(bjt['emitter'])
         model_name = bjt['model']
         
-    if model_name in transistor_models and model_name not in added_models:
-        model = transistor_models[model_name]
+        if model_name in transistor_models and model_name not in added_models:
+            model = transistor_models[model_name]
 
-        # Nested structure for transistor models
-        for bjt_type, model_params in model.items():
-            circuit.model(model_name, bjt_type, **model_params)
-            added_models.add(model_name)
-        
-        circuit.BJT(name, collector, base, emitter, model=model_name)
+            # Nested structure for transistor models
+            for bjt_type, model_params in model.items():
+                circuit.model(model_name, bjt_type, **model_params)
+                added_models.add(model_name)
+            
+            circuit.BJT(name, collector, base, emitter, model=model_name)
     
     return circuit
 
