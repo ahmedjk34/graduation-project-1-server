@@ -1,4 +1,5 @@
 from flask import Blueprint, Response, request, jsonify
+import json
 from config import GROQ_API_KEY
 from rag.prompts import GROQ_GENERAL_ASSISTANT_PROMPT
 from utils.llm_utils import create_groq_client
@@ -43,7 +44,9 @@ def call_llm():
                 for chunk in response:
                     content = getattr(getattr(chunk.choices[0], "delta", None), "content", None)
                     if content:
-                        yield f"data: {content}\n\n"
+                        # Convert em-spaces to newlines as safety measure [this bug took 2hours out of my life]
+                        content = content.replace('\u2003', '\n')
+                        yield f"data: {json.dumps(content)}\n\n"
             except Exception as e:
                 yield f"event: error\ndata: {str(e)}\n\n"
 

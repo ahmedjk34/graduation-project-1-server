@@ -191,7 +191,9 @@ def deck_chat():
                 for chunk in response:
                     content = getattr(getattr(chunk.choices[0], "delta", None), "content", None)
                     if content:
-                        yield f"data: {content}\n\n"
+                        # Convert em-spaces to newlines as safety measure [this bug took 2hours out of my life]
+                        content = content.replace('\u2003', '\n')
+                        yield f"data: {json.dumps(content)}\n\n"
             except Exception as e:
                 yield f"event: error\ndata: {str(e)}\n\n"
 

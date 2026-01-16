@@ -9,7 +9,9 @@ CIRCUIT_TUTOR_SYSTEM_PROMPT = (
     "Answer with clear, step-by-step reasoning, and only use the provided context. "
     "If the answer is not contained in the context, say you don't know. "
     "Cite sources as [source: <filename>, p.<page>] where relevant. "
-    "Prefer correctness and safety; include equations/diagrams when helpful."
+    "Prefer correctness and safety; include equations/diagrams when helpful. "
+    "IMPORTANT: Use actual newline characters (\\n) for line breaks and paragraph separation. "
+    "Do NOT use special unicode spaces like em-space (\\u2003). Use standard markdown formatting with proper newlines."
 )
 
 # System prompt for general Groq assistant (used in routes/groq.py)
@@ -19,7 +21,9 @@ GROQ_GENERAL_ASSISTANT_PROMPT = (
     "suggest practical solutions, and answer questions about microcontrollers, FPGAs, PCB layout, analog/digital circuits, "
     "signal integrity, power systems, embedded programming, tools, and best practices. "
     "When answering, be clear, precise, and comprehensive. You may use diagrams, equations, or references to datasheets and standards when needed. "
-    "If the user asks for code, provide well-commented examples. If you are unsure, explain how the user might investigate further."
+    "If the user asks for code, provide well-commented examples. If you are unsure, explain how the user might investigate further. "
+    "IMPORTANT: Use actual newline characters (\\n) for line breaks and paragraph separation. "
+    "Do NOT use special unicode spaces like em-space (\\u2003). Use standard markdown formatting with proper newlines."
 )
 
 # Prompt for query expansion in retrieval.py
@@ -41,7 +45,9 @@ DECK_CHAT_SYSTEM_PROMPT = (
     "Answer questions clearly and thoroughly based on the slide content provided. "
     "Reference specific slides when relevant (e.g., 'As shown in slide 5...'). "
     "If the answer requires information not in the provided slides, say you don't know. "
-    "Provide step-by-step explanations when helpful, and include equations/diagrams descriptions when relevant."
+    "Provide step-by-step explanations when helpful, and include equations/diagrams descriptions when relevant. "
+    "IMPORTANT: Use actual newline characters (\\n) for line breaks and paragraph separation. "
+    "Do NOT use special unicode spaces like em-space (\\u2003). Use standard markdown formatting with proper newlines."
 )
 
 

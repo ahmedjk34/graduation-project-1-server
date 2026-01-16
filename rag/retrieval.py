@@ -362,7 +362,9 @@ def generate_answer(question: str, contexts: List[Dict], metadata: Dict = None):
             for chunk in resp:
                 content = getattr(getattr(chunk.choices[0], "delta", None), "content", None)
                 if content:
-                    yield f"data: {content}\n\n"
+                    # Convert em-spaces to newlines as safety measure
+                    content = content.replace('\u2003', '\n')
+                    yield f"data: {json.dumps(content)}\n\n"
         except Exception as e:
             yield f"event: error\ndata: {str(e)}\n\n"
 
