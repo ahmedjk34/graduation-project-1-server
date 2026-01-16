@@ -45,7 +45,9 @@
 
 from typing import List, Dict, Any, Tuple
 import logging
+import json
 import chromadb
+from flask import Response
 
 logger = logging.getLogger(__name__)
 from config import (
@@ -328,7 +330,7 @@ def build_prompt(question: str, contexts: List[Dict]) -> List[Dict]:
 
 # Generates answer using Groq with retrieved context
 # Returns answer or error dict
-def generate_answer(question: str, contexts: List[Dict]) -> Dict:
+def generate_answer(question: str, contexts: List[Dict], metadata: Dict = None):
     if groq_client is None:
         return {"error": "GROQ_API_KEY is missing or invalid."}
     
@@ -348,9 +350,29 @@ def generate_answer(question: str, contexts: List[Dict]) -> Dict:
             temperature=0.2,
             stream=True,
         )
-        # 3. Extract answer
-        answer = resp.choices[0].message.content
-        print("Generated answer: ", answer)
-        return {"answer": answer}
     except Exception as e:
         return {"error": f"Groq API error: {str(e)}"}
+    
+    def SSE():
+        # Send metadata first if provided
+        if metadata:
+            yield f"event: metadata\ndata: {json.dumps(metadata)}\n\n"
+        
+        try:
+            for chunk in resp:
+                content = getattr(getattr(chunk.choices[0], "delta", None), "content", None)
+                if content:
+                    yield f"data: {content}\n\n"
+        except Exception as e:
+            yield f"event: error\ndata: {str(e)}\n\n"
+
+        yield "event: done\ndata: [DONE]\n\n"
+
+    return Response(
+        SSE(),
+        mimetype='text/event-stream',
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

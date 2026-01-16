@@ -1,5 +1,6 @@
 # server/routes/rag.py
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
+import json
 
 from rag.ingest import ingest_directory
 from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client, build_slides_context
@@ -63,11 +64,7 @@ def rag_chat():
             top_k=top_k,
             use_query_expansion=expand
         )
-        # 5. Generate answer using Groq with retrieved context
-        gen = generate_answer(question, ctx)
-        if "error" in gen:
-            return jsonify({"error": gen["error"]}), 500
-        # 6. Extract sources for UI display
+        # 5. Extract sources for UI display
         sources = []
         for c in ctx:
             source_info = {"source": c.get("source", "unknown")}
@@ -81,13 +78,22 @@ def rag_chat():
             else:
                 source_info["page"] = c.get("page")
             sources.append(source_info)
-        # 7. Return response with answer and sources
-        return jsonify({
+        
+        # 6. Generate answer using Groq with retrieved context (returns Response for SSE)
+        metadata = {
             "question": question,
             "used_queries": used_queries,
-            "answer": gen["answer"],
             "sources": sources
-        }), 200
+        }
+        gen_response = generate_answer(question, ctx, metadata=metadata)
+        
+        # 7. Check if it's an error dict instead of Response
+        if isinstance(gen_response, dict) and "error" in gen_response:
+            return jsonify({"error": gen_response["error"]}), 500
+        
+        # 8. Return the SSE Response
+        return gen_response
+        
     except Exception as e:
         return jsonify({
             "error": "RAG pipeline failed",
@@ -149,17 +155,7 @@ def deck_chat():
             }
         ]
         
-        # 6. Generate answer using Groq
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            temperature=0.2,
-            stream=True,
-        )
-        
-        answer = response.choices[0].message.content.strip()
-        
-        # 7. Format sources for response
+        # 6. Format sources for response
         sources = []
         for slide in slides:
             sources.append({
@@ -169,14 +165,47 @@ def deck_chat():
                 "chunk_type": "slide"
             })
         
-        # 8. Return response
-        return jsonify({
-            "question": question,
-            "deck_ids": deck_ids,
-            "total_slides": len(slides),
-            "answer": answer,
-            "sources": sources
-        }), 200
+        # 7. Generate answer using Groq with SSE streaming
+        try:
+            response = groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=0.2,
+                stream=True,
+            )
+        except Exception as e:
+            return jsonify({"error": "Error communicating with LLM provider.", "details": str(e)}), 502
+        
+        def SSE():
+            # Send metadata first
+            metadata = {
+                "question": question,
+                "deck_ids": deck_ids,
+                "total_slides": len(slides),
+                "sources": sources
+            }
+            yield f"event: metadata\ndata: {json.dumps(metadata)}\n\n"
+            
+            # Stream the response
+            try:
+                for chunk in response:
+                    content = getattr(getattr(chunk.choices[0], "delta", None), "content", None)
+                    if content:
+                        yield f"data: {content}\n\n"
+            except Exception as e:
+                yield f"event: error\ndata: {str(e)}\n\n"
+
+            yield "event: done\ndata: [DONE]\n\n"
+        
+        # 8. Return SSE response
+        return Response(
+            SSE(),
+            mimetype='text/event-stream',
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
     
     except Exception as e:
         return jsonify({
