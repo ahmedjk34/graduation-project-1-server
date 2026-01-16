@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, Response, request, jsonify
 from config import GROQ_API_KEY
 from rag.prompts import GROQ_GENERAL_ASSISTANT_PROMPT
 from utils.llm_utils import create_groq_client
@@ -18,7 +18,6 @@ def call_llm():
         return jsonify({"error": "Request must be JSON with a 'prompt' field."}), 400
 
     data = request.get_json(silent=True)
-    print(data)
 
     user_prompt = data.get('prompt')
     if user_prompt is None or not user_prompt.strip():
@@ -35,27 +34,47 @@ def call_llm():
         response = client.chat.completions.create(
             messages=messages,
             model="moonshotai/kimi-k2-instruct-0905",
+            stream=True,
         )
     except Exception as e:
-        return jsonify({"error": "Error communicating with LLM provider.", "details": str(e)}), 502
+            return jsonify({"error": "Error communicating with LLM provider.", "details": str(e)}), 502
+    def SSE():
+            try:
+                for chunk in response:
+                    content = getattr(getattr(chunk.choices[0], "delta", None), "content", None)
+                    if content:
+                        yield f"data: {content}\n\n"
+            except Exception as e:
+                yield f"event: error\ndata: {str(e)}\n\n"
 
-    answer = None
+            yield "event: done\ndata: [DONE]\n\n"
 
-    #Proper parsing of response
-    try:
-        choices = response.choices if hasattr(response, "choices") else (response.get("choices") if isinstance(response, dict) else None)
-        if choices and len(choices) > 0:
-            first = choices[0]
-            if hasattr(first, "message") and hasattr(first.message, "content"):
-                answer = first.message.content
-            elif isinstance(first, dict):
-                answer = first.get("message", {}).get("content") or first.get("text")
-            elif hasattr(first, "text"):
-                answer = first.text
-    except Exception:
-        answer = None
+    return Response(
+        SSE(),
+        mimetype='text/event-stream',
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
-    if not answer:
-        return jsonify({"error": "No answer returned from LLM provider."}), 502
 
-    return jsonify({"prompt": user_prompt, "answer": answer}), 200
+
+    # #Proper parsing of response
+    # try:
+    #     choices = response.choices if hasattr(response, "choices") else (response.get("choices") if isinstance(response, dict) else None)
+    #     if choices and len(choices) > 0:
+    #         first = choices[0]
+    #         if hasattr(first, "message") and hasattr(first.message, "content"):
+    #             answer = first.message.content
+    #         elif isinstance(first, dict):
+    #             answer = first.get("message", {}).get("content") or first.get("text")
+    #         elif hasattr(first, "text"):
+    #             answer = first.text
+    # except Exception:
+    #     answer = None
+
+    # if not answer:
+    #     return jsonify({"error": "No answer returned from LLM provider."}), 502
+
+    # return jsonify({"prompt": user_prompt, "answer": answer}), 200

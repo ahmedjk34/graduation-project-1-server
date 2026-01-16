@@ -19,3 +19,5 @@
 ## Upgrading RAG stuff
 
 Token streaming: [https://community.groq.com/t/how-do-i-enable-streaming-for-real-time-responses/480]
+How to implement streaming in Flask (idk why i didn't use FastAPI man...) [https://www.youtube.com/watch?v=z6iYcqNECwA]
+Also: yield that is used in python, is an SSE shorthand sort of speak, and I dealt with SSE many times in work, so should be an easy task ;)
