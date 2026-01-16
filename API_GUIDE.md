@@ -8,6 +8,8 @@
 
 This API provides endpoints for ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB) and performing Retrieval-Augmented Generation (RAG) queries against the ingested content. The system uses local embeddings with sentence-transformers and Groq API for LLM generation. It also supports quiz generation from slide decks.
 
+**Streaming Responses:** Several endpoints (`/rag/chat`, `/rag/deck-chat`, `/groq/general-llm`) use Server-Sent Events (SSE) to stream responses token-by-token for real-time display. See the [SSE Streaming](#server-sent-events-sse-streaming) section for details on handling these streams.
+
 ### Base URL
 
 ```
@@ -127,7 +129,7 @@ curl -X POST http://localhost:5000/rag/ingest \
 
 **Endpoint:** `POST /rag/chat`
 
-**Description:** Performs a RAG-powered query against the ingested documents. Retrieves relevant context chunks (from PDFs, slides, or both), generates an answer using Groq API, and returns the answer with source citations. Supports both page-based chunks (from regular PDFs) and slide chunks (from slide decks).
+**Description:** Performs a RAG-powered query against the ingested documents. Retrieves relevant context chunks (from PDFs, slides, or both), generates an answer using Groq API, and streams the answer with source citations via Server-Sent Events (SSE). Supports both page-based chunks (from regular PDFs) and slide chunks (from slide decks).
 
 **Request Body:**
 
@@ -168,12 +170,52 @@ curl -X POST http://localhost:5000/rag/chat \
    }
    ```
 
-**Response:**
+**Response Format:**
+
+This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: text/event-stream`. The response consists of:
+
+1. **Metadata event** (sent first):
+
+   ```
+   event: metadata
+   data: {"question":"What is an Op-amp?","used_queries":["What is an Op-amp?","operational amplifier fundamentals",...],"sources":[...]}
+   ```
+
+2. **Token events** (streamed as they arrive):
+
+   ```
+   data: An **operational amplifier
+   data:  (op‑amp)** is a high‑gain
+   data:  differential amplifier...
+   ```
+
+3. **Done event** (sent when complete):
+   ```
+   event: done
+   data: [DONE]
+   ```
+
+**Response Fields (in metadata event):**
+
+- `question`: The original question asked
+- `sources`: Array of source objects containing:
+  - For page chunks: `source` (filename) and `page` (page number)
+  - For slide chunks: `source` (deck_id), `slide_number`, `chunk_type: "slide"`
+  - For window chunks: `source` (deck_id), `start_slide`, `end_slide`, `chunk_type: "window"`
+- `used_queries`: Array of queries used for retrieval (original question + expanded queries if query expansion was enabled)
+
+**Example Metadata Event Data:**
 
 ```json
 {
-  "answer": "An **operational amplifier (op‑amp)** is a high‑gain differential amplifier that can be configured with external passive components (resistors, capacitors, etc.) to perform mathematical operations such as addition, subtraction, integration, differentiation, and division on input signals.  Early op‑amps were built with vacuum‑tube stages and required high‑voltage supplies, but the basic idea—using a very large open‑loop gain and closing the loop with external components to obtain a desired transfer function—remains the same today[2].  \n\nIn modern practice the op‑amp is idealized with assumptions of zero input current, zero input offset voltage, infinite input impedance, zero output impedance, and infinite open‑loop gain, which make the analysis of op‑amp circuits straightforward[8].  ",
   "question": "What is an Op-amp?",
+  "used_queries": [
+    "What is an Op-amp?",
+    "operational amplifier fundamentals",
+    "op‑amp input and output characteristics",
+    "common op‑amp circuit configurations",
+    "applications of op‑amps in signal processing"
+  ],
   "sources": [
     {
       "page": 415,
@@ -194,26 +236,50 @@ curl -X POST http://localhost:5000/rag/chat \
       "page": 26,
       "source": "op_amps_everyone.pdf"
     }
-  ],
-  "used_queries": [
-    "What is an Op-amp?",
-    "operational amplifier fundamentals",
-    "op‑amp input and output characteristics",
-    "common op‑amp circuit configurations",
-    "applications of op‑amps in signal processing"
   ]
 }
 ```
 
-**Response Fields:**
+**JavaScript Example (Handling SSE Stream):**
 
-- `question`: The original question asked
-- `answer`: The generated answer with inline citations (e.g., `[2]`, `[8]`)
-- `sources`: Array of source objects containing:
-  - For page chunks: `source` (filename) and `page` (page number)
-  - For slide chunks: `source` (deck_id), `slide_number`, `chunk_type: "slide"`
-  - For window chunks: `source` (deck_id), `start_slide`, `end_slide`, `chunk_type: "window"`
-- `used_queries`: Array of queries used for retrieval (original question + expanded queries if query expansion was enabled)
+```javascript
+const eventSource = new EventSource("http://localhost:5000/rag/chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ question: "What is an Op-amp?" }),
+});
+
+let metadata = null;
+let answer = "";
+
+eventSource.addEventListener("metadata", (e) => {
+  metadata = JSON.parse(e.data);
+  console.log("Sources:", metadata.sources);
+  console.log("Used queries:", metadata.used_queries);
+});
+
+eventSource.addEventListener("message", (e) => {
+  if (e.data !== "[DONE]") {
+    // Content is JSON-encoded to preserve newlines
+    const token = JSON.parse(e.data);
+    answer += token;
+    // Update UI with streaming answer
+    document.getElementById("answer").textContent = answer;
+  }
+});
+
+eventSource.addEventListener("done", () => {
+  eventSource.close();
+  console.log("Stream complete. Final answer:", answer);
+});
+
+eventSource.addEventListener("error", (e) => {
+  console.error("Stream error:", e.data);
+  eventSource.close();
+});
+```
+
+**Note:** The answer tokens are streamed incrementally. Concatenate all `data:` events (except the `[DONE]` event) to reconstruct the full answer. The answer includes inline citations (e.g., `[2]`, `[8]`) that correspond to the sources in the metadata.
 
 **Error Responses:**
 
@@ -262,7 +328,7 @@ Groq API error:
 
 **Endpoint:** `POST /rag/deck-chat`
 
-**Description:** Chat endpoint that retrieves ALL slides from specified deck(s) and attaches them to every prompt. Unlike the RAG chat endpoint, this does NOT perform semantic search - it simply loads all slides from the deck(s) and includes them in the context for every question. Use this when you want to chat about specific slide decks without selective retrieval.
+**Description:** Chat endpoint that retrieves ALL slides from specified deck(s) and attaches them to every prompt. Unlike the RAG chat endpoint, this does NOT perform semantic search - it simply loads all slides from the deck(s) and includes them in the context for every question. Use this when you want to chat about specific slide decks without selective retrieval. Returns a streaming response via Server-Sent Events (SSE).
 
 **Request Body:**
 
@@ -303,14 +369,49 @@ curl -X POST http://localhost:5000/rag/deck-chat \
    }
    ```
 
-**Response:**
+**Response Format:**
+
+This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: text/event-stream`. The response consists of:
+
+1. **Metadata event** (sent first):
+
+   ```
+   event: metadata
+   data: {"question":"What are the main topics covered in these slides?","deck_ids":["pptx_deck_abc123"],"total_slides":25,"sources":[...]}
+   ```
+
+2. **Token events** (streamed as they arrive):
+
+   ```
+   data: Based on the slide deck
+   data: , the main topics covered
+   data:  include...
+   ```
+
+3. **Done event** (sent when complete):
+   ```
+   event: done
+   data: [DONE]
+   ```
+
+**Response Fields (in metadata event):**
+
+- `question`: The original question asked
+- `deck_ids`: Array of deck IDs used
+- `total_slides`: Total number of slides loaded and attached to context
+- `sources`: Array of all slides from the deck(s), each containing:
+  - `source`: The deck_id
+  - `slide_number`: Slide number
+  - `slide_title`: Title of the slide
+  - `chunk_type`: Always "slide"
+
+**Example Metadata Event Data:**
 
 ```json
 {
   "question": "What are the main topics covered in these slides?",
   "deck_ids": ["pptx_deck_abc123"],
   "total_slides": 25,
-  "answer": "Based on the slide deck, the main topics covered include...",
   "sources": [
     {
       "source": "pptx_deck_abc123",
@@ -329,17 +430,54 @@ curl -X POST http://localhost:5000/rag/deck-chat \
 }
 ```
 
-**Response Fields:**
+**JavaScript Example (Handling SSE Stream):**
 
-- `question`: The original question asked
-- `deck_ids`: Array of deck IDs used
-- `total_slides`: Total number of slides loaded and attached to context
-- `answer`: The generated answer based on all slides in the deck(s)
-- `sources`: Array of all slides from the deck(s), each containing:
-  - `source`: The deck_id
-  - `slide_number`: Slide number
-  - `slide_title`: Title of the slide
-  - `chunk_type`: Always "slide"
+```javascript
+const response = await fetch("http://localhost:5000/rag/deck-chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    question: "What are the main topics covered in these slides?",
+    deck_ids: ["pptx_deck_abc123"],
+  }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let metadata = null;
+let answer = "";
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  const chunk = decoder.decode(value);
+  const lines = chunk.split("\n");
+
+  for (const line of lines) {
+    if (line.startsWith("event: metadata")) {
+      const nextLine = lines[lines.indexOf(line) + 1];
+      if (nextLine.startsWith("data: ")) {
+        metadata = JSON.parse(nextLine.substring(6));
+        console.log("Sources:", metadata.sources);
+      }
+    } else if (line.startsWith("data: ")) {
+      const data = line.substring(6);
+      if (data === "[DONE]") {
+        console.log("Stream complete");
+        break;
+      } else {
+        // Content is JSON-encoded to preserve newlines
+        const token = JSON.parse(data);
+        answer += token;
+        // Update UI with streaming answer
+      }
+    }
+  }
+}
+```
+
+**Note:** The answer tokens are streamed incrementally. Concatenate all `data:` events (except the `[DONE]` event) to reconstruct the full answer.
 
 **Error Responses:**
 
@@ -762,7 +900,7 @@ Groq API error (500):
 
 **Endpoint:** `POST /groq/general-llm`
 
-**Description:** Direct LLM query without RAG context. Uses general circuit design knowledge. Does not use ingested documents.
+**Description:** Direct LLM query without RAG context. Uses general circuit design knowledge. Does not use ingested documents. Returns a streaming response via Server-Sent Events (SSE).
 
 **Request Body:**
 
@@ -780,12 +918,64 @@ curl -X POST http://localhost:5000/groq/general-llm \
   -d '{"prompt": "Explain how a transistor works"}'
 ```
 
-**Response:**
+**Response Format:**
 
-```json
-{
-  "prompt": "Explain how a transistor works",
-  "answer": "A transistor is a semiconductor device that can amplify or switch electronic signals..."
+This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: text/event-stream`. The response consists of:
+
+1. **Token events** (streamed as they arrive):
+
+   ```
+   data: A transistor is a semiconductor
+   data:  device that can amplify
+   data:  or switch electronic signals...
+   ```
+
+2. **Done event** (sent when complete):
+   ```
+   event: done
+   data: [DONE]
+   ```
+
+**JavaScript Example (Handling SSE Stream):**
+
+```javascript
+const response = await fetch("http://localhost:5000/groq/general-llm", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ prompt: "Explain how a transistor works" }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let answer = "";
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  const chunk = decoder.decode(value);
+  const lines = chunk.split("\n");
+
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const data = line.substring(6);
+      if (data === "[DONE]") {
+        console.log("Stream complete");
+        break;
+      } else {
+        // Content is JSON-encoded to preserve newlines
+        const token = JSON.parse(data);
+        answer += token;
+        // Update UI with streaming answer
+        document.getElementById("answer").textContent = answer;
+      }
+    } else if (line.startsWith("event: error")) {
+      const nextLine = lines[lines.indexOf(line) + 1];
+      if (nextLine.startsWith("data: ")) {
+        console.error("Error:", nextLine.substring(6));
+      }
+    }
+  }
 }
 ```
 
@@ -807,7 +997,7 @@ LLM not configured (500):
 }
 ```
 
-**Note:** This endpoint does not use the ingested documents and provides general knowledge responses based on the LLM's training data.
+**Note:** This endpoint does not use the ingested documents and provides general knowledge responses based on the LLM's training data. The response is streamed token-by-token for real-time display.
 
 ---
 
@@ -918,9 +1108,111 @@ This improves recall, especially for domain-specific terminology or when questio
 
 ---
 
+## Server-Sent Events (SSE) Streaming
+
+The following endpoints use SSE streaming for real-time token delivery:
+
+- `/rag/chat` - RAG-powered Q&A
+- `/rag/deck-chat` - Deck-based chat
+- `/groq/general-llm` - General LLM queries
+
+### SSE Event Types
+
+1. **`event: metadata`** - Contains metadata about the request (sources, used_queries, etc.). Sent first, before token streaming begins.
+2. **`data: <token>`** - Individual tokens of the answer, streamed as they are generated.
+3. **`event: done`** - Signals that streaming is complete. The data field contains `[DONE]`.
+4. **`event: error`** - Signals an error occurred during streaming. The data field contains the error message.
+
+**Important Note on Newlines:**
+
+The system ensures proper newline handling through multiple layers:
+
+1. **System Prompt Instructions**: All LLM system prompts explicitly instruct the model to use actual newline characters (`\n`) for line breaks and paragraph separation, and to avoid special unicode spaces like em-space (`\u2003`).
+
+2. **Post-Processing Safety Net**: As a safety measure, the backend automatically converts any em-space characters (`\u2003`) to newlines (`\n`) before streaming. This ensures proper markdown rendering even if the LLM occasionally outputs em-spaces.
+
+3. **JSON Encoding for Transport**: Content is JSON-encoded before sending (e.g., `"Hello\nWorld"` becomes `"\"Hello\\nWorld\""`), which ensures newlines survive SSE transport. The frontend must `JSON.parse()` each `data:` event to decode the content and restore the original newlines.
+
+4. **SSE Protocol Delimiters**: The `\n\n` at the end of each SSE line is the SSE protocol delimiter (required by the specification), not part of the content.
+
+**Result**: Markdown formatting with proper line breaks and paragraph separation is preserved throughout the entire pipeline, from LLM generation to frontend display.
+
+### Handling SSE Streams
+
+**In JavaScript (using EventSource-like approach):**
+
+```javascript
+const response = await fetch("http://localhost:5000/rag/chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ question: "Your question" }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split("\n");
+  buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("event: ")) {
+      const eventType = line.substring(7);
+      const nextLine = lines[++i];
+      if (nextLine && nextLine.startsWith("data: ")) {
+        const data = nextLine.substring(6);
+        handleEvent(eventType, data);
+      }
+    } else if (line.startsWith("data: ")) {
+      const data = line.substring(6);
+      if (data !== "[DONE]") {
+        // Content is JSON-encoded to preserve newlines
+        const token = JSON.parse(data);
+        handleToken(token);
+      }
+    }
+  }
+}
+```
+
+**In Python (using requests):**
+
+```python
+import requests
+import json
+
+response = requests.post(
+    'http://localhost:5000/rag/chat',
+    json={'question': 'Your question'},
+    stream=True
+)
+
+for line in response.iter_lines():
+    if line:
+        line = line.decode('utf-8')
+        if line.startswith('event: '):
+            event_type = line[7:]
+        elif line.startswith('data: '):
+            data = line[6:]
+            if event_type == 'metadata':
+                metadata = json.loads(data)
+            elif data == '[DONE]':
+                break
+            else:
+                # Token data - JSON-encoded to preserve newlines
+                token = json.loads(data)
+                print(token, end='', flush=True)
+```
+
 ## Citation Format
 
-Answers from `/rag/chat` include inline citations in the format `[1]`, `[2]`, etc. These correspond to the sources in the `sources` array, where:
+Answers from `/rag/chat` include inline citations in the format `[1]`, `[2]`, etc. These correspond to the sources in the `sources` array from the metadata event, where:
 
 - `[1]` = first source in the array
 - `[2]` = second source in the array
@@ -938,10 +1230,13 @@ Each source includes:
 
 - **Ingestion (PDFs):** Processing time depends on PDF size and number of files. Large PDFs (e.g., 464 pages) may take several minutes.
 - **Ingestion (Slides):** Processing time depends on number of slides and OCR requirements. Typical deck (15-50 slides) takes 10-30 seconds.
-- **Query Response (`/rag/chat`):** Typically under 10 seconds (meets FR-15.2 requirement). Response time depends on:
+- **Query Response (`/rag/chat`):** Uses SSE streaming for real-time token delivery. First token typically arrives within 2-5 seconds. Total response time depends on:
   - Query expansion (adds ~1-2 seconds if enabled)
   - Number of chunks retrieved
   - Groq API response time
+  - Answer length (longer answers stream over more time)
+- **Deck Chat (`/rag/deck-chat`):** Uses SSE streaming. First token typically arrives within 3-7 seconds depending on deck size.
+- **General LLM (`/groq/general-llm`):** Uses SSE streaming. First token typically arrives within 1-3 seconds.
 - **Quiz Generation (`/rag/generate-quiz`):** Processing time depends on:
   - Number of slides (more slides = longer LLM prompt)
   - Number of questions requested
@@ -1018,15 +1313,16 @@ All example responses in this document were taken directly from actual test runs
 
 ## Summary of Endpoints
 
-| Endpoint             | Method | Purpose                      | Input                                             | Output                    |
-| -------------------- | ------ | ---------------------------- | ------------------------------------------------- | ------------------------- |
-| `/health`            | GET    | Health check                 | None                                              | "OK"                      |
-| `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary         |
-| `/rag/chat`          | POST   | RAG-powered Q&A              | `question`, `top_k`, `use_query_expansion`        | Answer + sources          |
-| `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats         |
-| `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready) |
-| `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`      |
-| `/groq/general-llm`  | POST   | Direct LLM query (no RAG)    | `prompt`                                          | LLM response              |
+| Endpoint             | Method | Purpose                      | Input                                             | Output                     | Response Type |
+| -------------------- | ------ | ---------------------------- | ------------------------------------------------- | -------------------------- | ------------- |
+| `/health`            | GET    | Health check                 | None                                              | "OK"                       | Plain text    |
+| `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary          | JSON          |
+| `/rag/chat`          | POST   | RAG-powered Q&A              | `question`, `top_k`, `use_query_expansion`        | Streaming answer + sources | SSE stream    |
+| `/rag/deck-chat`     | POST   | Deck-based chat (no RAG)     | `question`, `deck_ids`                            | Streaming answer + sources | SSE stream    |
+| `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats          | JSON          |
+| `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready)  | JSON          |
+| `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`       | JSON          |
+| `/groq/general-llm`  | POST   | Direct LLM query (no RAG)    | `prompt`                                          | Streaming LLM response     | SSE stream    |
 
 ---
 
