@@ -346,6 +346,7 @@ def generate_answer(question: str, contexts: List[Dict]) -> Dict:
             model=GROQ_MODEL,
             messages=messages,
             temperature=0.2,
+            stream=True,
         )
         # 3. Extract answer
         answer = resp.choices[0].message.content

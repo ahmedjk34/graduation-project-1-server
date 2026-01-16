@@ -154,6 +154,7 @@ def deck_chat():
             model=GROQ_MODEL,
             messages=messages,
             temperature=0.2,
+            stream=True,
         )
         
         answer = response.choices[0].message.content.strip()
