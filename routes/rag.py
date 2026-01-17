@@ -84,12 +84,29 @@ def rag_chat():
     top_k = int(data.get("top_k", 5))
     expand = bool(data.get("use_query_expansion", True))
 
+    # 3.5. Extract conversation context for context-aware query expansion
+    conversation_history = None
+    rollup_memory = None
+    if session_id:
+        from utils.conversation_storage import get_storage
+        storage = get_storage()
+        session = storage.get_session(session_id)
+        if session:
+            rollup_memory = session.rollup_memory
+            # Use messages_array if provided, otherwise use session.messages
+            conversation_history = messages_array if messages_array else session.messages
+    elif messages_array:
+        # No session_id but messages_array provided
+        conversation_history = messages_array
+
     # 4. Retrieve relevant context chunks
     try:
         ctx, used_queries = retrieve_context(
             question,
             top_k=top_k,
-            use_query_expansion=expand
+            use_query_expansion=expand,
+            conversation_history=conversation_history,
+            rollup_memory=rollup_memory
         )
         # 5. Extract sources for UI display
         sources = []
@@ -186,13 +203,30 @@ def deck_chat():
     top_k = int(data.get("top_k", 5))
     expand = bool(data.get("use_query_expansion", True))
 
+    # 3.5. Extract conversation context for context-aware query expansion
+    conversation_history = None
+    rollup_memory = None
+    if session_id:
+        from utils.conversation_storage import get_storage
+        storage = get_storage()
+        session = storage.get_session(session_id)
+        if session:
+            rollup_memory = session.rollup_memory
+            # Use messages_array if provided, otherwise use session.messages
+            conversation_history = messages_array if messages_array else session.messages
+    elif messages_array:
+        # No session_id but messages_array provided
+        conversation_history = messages_array
+
     # 4. Retrieve relevant context using RAG (filtered to specified deck_ids)
     try:
         ctx, used_queries = retrieve_context(
             question,
             top_k=top_k,
             use_query_expansion=expand,
-            deck_ids=deck_ids  # Filter to only search within specified decks
+            deck_ids=deck_ids,  # Filter to only search within specified decks
+            conversation_history=conversation_history,
+            rollup_memory=rollup_memory
         )
         
         if not ctx:

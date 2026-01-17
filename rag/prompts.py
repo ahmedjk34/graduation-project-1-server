@@ -30,6 +30,7 @@ GROQ_GENERAL_ASSISTANT_PROMPT = (
 QUERY_EXPANSION_SYSTEM_PROMPT = (
     "Generate up to {n} concise, single-topic search reformulations for retrieving "
     "relevant material about electrical/digital circuits. One per line, no numbering."
+    "{context_section}"
 )
 
 # System prompt for quiz generation (used in /rag/generate-quiz)

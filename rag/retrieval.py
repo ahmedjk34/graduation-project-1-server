@@ -73,14 +73,39 @@ collection = chroma_client.get_or_create_collection(
 
 # Generates alternative query phrasings using Groq
 # Helps find documents that use different wording
-def expand_query_via_groq(query: str, n: int = 4) -> List[str]:
+# Enhanced with context-awareness: uses conversation history for better query expansion
+def expand_query_via_groq(
+    query: str, 
+    n: int = 4,
+    conversation_history: Optional[List[Dict]] = None,
+    rollup_memory: Optional[str] = None
+) -> List[str]:
     if groq_client is None:
         return []
     
-    # 1. Build prompt for query reformulation
-    system_prompt = QUERY_EXPANSION_SYSTEM_PROMPT.format(n=n)
+    # 1. Build context section for prompt
+    context_section = ""
+    if rollup_memory:
+        context_section += f"\n\nPrevious conversation context:\n{rollup_memory}\n"
     
-    # 2. Call Groq to generate alternatives
+    if conversation_history:
+        # Take last 4 non-system messages for context (to avoid token bloat)
+        recent_messages = [msg for msg in conversation_history[-6:] if msg.get("role") != "system"][-4:]
+        if recent_messages:
+            context_section += "\nRecent conversation:\n"
+            for msg in recent_messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")[:200]  # Truncate long messages
+                context_section += f"{role.title()}: {content}\n"
+    
+    # 2. Build prompt for query reformulation with context
+    # Add instruction if context is provided
+    if context_section.strip():
+        context_section += "\n\nIf conversation context is provided above, use it to make queries more specific and relevant to the ongoing conversation."
+    
+    system_prompt = QUERY_EXPANSION_SYSTEM_PROMPT.format(n=n, context_section=context_section)
+    
+    # 3. Call Groq to generate alternatives
     try:
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -90,25 +115,38 @@ def expand_query_via_groq(query: str, n: int = 4) -> List[str]:
             ],
             temperature=0.2,
         )
-        # 3. Parse line-separated queries
+        # 4. Parse line-separated queries
         text = resp.choices[0].message.content.strip()
         alts = [line.strip() for line in text.split("\n") if line.strip()]
         return alts[:n]
     except Exception as e:
-        print(f"Query expansion failed: {e}")
+        logger.warning(f"Query expansion failed: {e}")
         return []
 
 
 # Retrieves relevant chunks from ChromaDB
 # Supports query expansion and neighbor expansion for slides
 # If deck_ids is provided, filters results to only include chunks from those decks
-def retrieve_context(question: str, top_k: int = 5, use_query_expansion: bool = True,
-                    neighbor_expansion: bool = True, neighbor_range: int = 1,
-                    deck_ids: Optional[List[str]] = None) -> Tuple[List[Dict], List[str]]:
+# Enhanced with context-awareness: uses conversation history for better query expansion
+def retrieve_context(
+    question: str, 
+    top_k: int = 5, 
+    use_query_expansion: bool = True,
+    neighbor_expansion: bool = True, 
+    neighbor_range: int = 1,
+    deck_ids: Optional[List[str]] = None,
+    conversation_history: Optional[List[Dict]] = None,
+    rollup_memory: Optional[str] = None
+) -> Tuple[List[Dict], List[str]]:
     # 1. Build query list (original + expansions)
     queries = [question]
     if use_query_expansion:
-        expanded = expand_query_via_groq(question, n=4)
+        expanded = expand_query_via_groq(
+            question, 
+            n=4,
+            conversation_history=conversation_history,
+            rollup_memory=rollup_memory
+        )
         queries.extend(expanded)
     
     # 2. Build where clause if deck_ids provided (for deck-specific RAG)
