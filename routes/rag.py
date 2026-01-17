@@ -8,6 +8,8 @@ from rag.slide_ingest import ingest_pdf_deck, ingest_pptx_deck
 from rag.ocr_adapter import get_ocr_adapter
 from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt, DECK_CHAT_SYSTEM_PROMPT
 from utils.llm_utils import extract_json_object
+from utils.conversation_storage import get_storage
+from utils.conversation_builder import build_conversation_messages
 
 from config import GROQ_MODEL
 
@@ -39,19 +41,44 @@ def ingest():
 
 # RAG-powered chat endpoint with source citations
 # Retrieves relevant context, generates grounded answer using Groq, returns with sources
+# Supports conversation history via messages array and session_id
 @rag_bp.route("/chat", methods=["POST"])
 def rag_chat():
     # 1. Validate request is JSON
     if not request.is_json:
         return jsonify({"error": "Request must be JSON."}), 400
 
-    # 2. Parse and validate question parameter
+    # 2. Parse and validate parameters
     data = request.get_json(silent=True) or {}
+    
+    # Support both old format (question) and new format (messages + session_id)
     question = (data.get("question") or "").strip()
-    if not question:
-        return jsonify({
-            "error": "'question' must be non-empty."
-        }), 400
+    messages_array = data.get("messages")  # Optional: array of {role, content}
+    session_id = data.get("session_id")  # Optional: for conversation management
+    
+    # Validate input
+    if not question and not messages_array:
+        return jsonify({"error": "Either 'question' or 'messages' must be provided."}), 400
+    
+    # If messages_array provided, extract question from last user message
+    if messages_array:
+        if not isinstance(messages_array, list):
+            return jsonify({"error": "'messages' must be an array."}), 400
+        if not messages_array:
+            return jsonify({"error": "'messages' array cannot be empty."}), 400
+        # Validate message format
+        for msg in messages_array:
+            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
+                return jsonify({"error": "Each message must have 'role' and 'content' fields."}), 400
+        # Extract question from last user message
+        for msg in reversed(messages_array):
+            if msg.get("role") == "user":
+                question = msg.get("content", "").strip()
+                break
+        if not question:
+            return jsonify({"error": "No user message found in 'messages' array."}), 400
+    elif not question:
+        return jsonify({"error": "'question' must be non-empty."}), 400
 
     # 3. Parse optional parameters with defaults
     top_k = int(data.get("top_k", 5))
@@ -85,7 +112,13 @@ def rag_chat():
             "used_queries": used_queries,
             "sources": sources
         }
-        gen_response = generate_answer(question, ctx, metadata=metadata)
+        gen_response = generate_answer(
+            question, 
+            ctx, 
+            metadata=metadata,
+            session_id=session_id,
+            messages_array=messages_array
+        )
         
         # 7. Check if it's an error dict instead of Response
         if isinstance(gen_response, dict) and "error" in gen_response:
@@ -103,6 +136,7 @@ def rag_chat():
 
 # Deck-based chat endpoint - retrieves ALL slides from specified decks
 # and attaches them to every prompt (no semantic search/RAG)
+# Supports conversation history via messages array and session_id
 @rag_bp.route("/deck-chat", methods=["POST"])
 def deck_chat():
     # 1. Validate request is JSON
@@ -111,11 +145,35 @@ def deck_chat():
 
     # 2. Parse and validate parameters
     data = request.get_json(silent=True) or {}
+    
+    # Support both old format (question) and new format (messages + session_id)
     question = (data.get("question") or "").strip()
-    if not question:
-        return jsonify({
-            "error": "'question' must be non-empty."
-        }), 400
+    messages_array = data.get("messages")  # Optional: array of {role, content}
+    session_id = data.get("session_id")  # Optional: for conversation management
+    
+    # Validate input
+    if not question and not messages_array:
+        return jsonify({"error": "Either 'question' or 'messages' must be provided."}), 400
+    
+    # If messages_array provided, extract question from last user message
+    if messages_array:
+        if not isinstance(messages_array, list):
+            return jsonify({"error": "'messages' must be an array."}), 400
+        if not messages_array:
+            return jsonify({"error": "'messages' array cannot be empty."}), 400
+        # Validate message format
+        for msg in messages_array:
+            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
+                return jsonify({"error": "Each message must have 'role' and 'content' fields."}), 400
+        # Extract question from last user message
+        for msg in reversed(messages_array):
+            if msg.get("role") == "user":
+                question = msg.get("content", "").strip()
+                break
+        if not question:
+            return jsonify({"error": "No user message found in 'messages' array."}), 400
+    elif not question:
+        return jsonify({"error": "'question' must be non-empty."}), 400
     
     deck_ids = data.get("deck_ids")
     if not deck_ids:
@@ -136,11 +194,12 @@ def deck_chat():
         # 4. Format slides into context string
         all_slides_content = build_slides_context(slides)
         
-        # 5. Build messages for Groq
+        # 5. Build messages for Groq with conversation management
         if groq_client is None:
             return jsonify({"error": "GROQ_API_KEY is missing or invalid."}), 500
         
-        messages = [
+        # Build base messages (system prompts)
+        base_messages = [
             {
                 "role": "system",
                 "content": DECK_CHAT_SYSTEM_PROMPT
@@ -148,12 +207,27 @@ def deck_chat():
             {
                 "role": "system",
                 "content": f"SLIDE DECK CONTENT:\n\n{all_slides_content}"
-            },
-            {
-                "role": "user",
-                "content": question
             }
         ]
+        
+        # Build conversation messages with rollup memory (handles session management)
+        # Note: We pass question as user_message for incremental mode, but it will be added at the end
+        messages = build_conversation_messages(
+            session_id=session_id,
+            user_message=question if not messages_array else None,
+            messages_array=messages_array,
+            base_messages=base_messages
+        )
+        
+        # Add current question as user message
+        # If messages_array was provided, the question is already in messages from session.messages
+        # If messages_array was not provided, shared function removed it in incremental mode, so we add it back
+        # Check if last message is already the question - if not, add it
+        if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != question:
+            messages.append({
+                "role": "user",
+                "content": question
+            })
         
         # 6. Format sources for response
         sources = []
@@ -176,7 +250,11 @@ def deck_chat():
         except Exception as e:
             return jsonify({"error": "Error communicating with LLM provider.", "details": str(e)}), 502
         
+        # Accumulator for storing full assistant response
+        assistant_response = ""
+        
         def SSE():
+            nonlocal assistant_response
             # Send metadata first
             metadata = {
                 "question": question,
@@ -193,11 +271,17 @@ def deck_chat():
                     if content:
                         # Convert em-spaces to newlines as safety measure [this bug took 2hours out of my life]
                         content = content.replace('\u2003', '\n')
+                        assistant_response += content
                         yield f"data: {json.dumps(content)}\n\n"
             except Exception as e:
                 yield f"event: error\ndata: {str(e)}\n\n"
-
-            yield "event: done\ndata: [DONE]\n\n"
+            finally:
+                # Store assistant response in session if session_id is provided
+                if session_id and assistant_response:
+                    storage = get_storage()
+                    storage.add_message(session_id, "assistant", assistant_response)
+                
+                yield "event: done\ndata: [DONE]\n\n"
         
         # 8. Return SSE response
         return Response(

@@ -131,11 +131,28 @@ curl -X POST http://localhost:5000/rag/ingest \
 
 **Description:** Performs a RAG-powered query against the ingested documents. Retrieves relevant context chunks (from PDFs, slides, or both), generates an answer using Groq API, and streams the answer with source citations via Server-Sent Events (SSE). Supports both page-based chunks (from regular PDFs) and slide chunks (from slide decks).
 
-**Request Body:**
+**Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
+
+**Request Body (Simple Format - Single Turn):**
 
 ```json
 {
-  "question": "What is an Op-amp?", // Required
+  "question": "What is an Op-amp?", // Required (if messages not provided)
+  "top_k": 5, // Optional, default: 5
+  "use_query_expansion": true // Optional, default: true
+}
+```
+
+**Request Body (Conversation Format - Multi-Turn):**
+
+```json
+{
+  "messages": [ // Required (if question not provided)
+    {"role": "user", "content": "What is an Op-amp?"},
+    {"role": "assistant", "content": "An operational amplifier (op-amp) is..."},
+    {"role": "user", "content": "How does it work in a circuit?"}
+  ],
+  "session_id": "session_123", // Optional: for conversation management
   "top_k": 5, // Optional, default: 5
   "use_query_expansion": true // Optional, default: true
 }
@@ -143,16 +160,49 @@ curl -X POST http://localhost:5000/rag/ingest \
 
 **Parameters:**
 
-- `question` (required): The question to ask
+- `question` (required if `messages` not provided): The question to ask (single-turn mode)
+- `messages` (required if `question` not provided): Array of conversation messages with `role` ("user" or "assistant") and `content` (string). Frontend should send full conversation history each time.
+- `session_id` (optional): Unique identifier for conversation session. Enables automatic conversation management with fixed window (30 messages) and rollup memory for older messages.
 - `top_k` (optional): Number of top results to retrieve per query (default: 5)
 - `use_query_expansion` (optional): Whether to use multi-query expansion for better recall (default: true)
 
-#### cURL Example
+**Conversation Management:**
+
+When `session_id` is provided, the backend automatically:
+- Keeps the last 30 messages (15 turns) as raw conversation history
+- Compresses older messages into rollup memory when the limit is exceeded
+- Includes rollup memory as context in every request
+- Stores assistant responses automatically
+
+**Message Format:**
+
+Each message in the `messages` array must have:
+- `role`: Either `"user"` or `"assistant"`
+- `content`: The message text (string)
+
+#### cURL Examples
+
+**Single-turn (simple):**
 
 ```bash
 curl -X POST http://localhost:5000/rag/chat \
      -H "Content-Type: application/json" \
      -d '{"question":"What is an Op-amp?"}'
+```
+
+**Multi-turn with conversation history:**
+
+```bash
+curl -X POST http://localhost:5000/rag/chat \
+     -H "Content-Type: application/json" \
+     -d '{
+       "messages": [
+         {"role": "user", "content": "What is an Op-amp?"},
+         {"role": "assistant", "content": "An operational amplifier..."},
+         {"role": "user", "content": "How does it work?"}
+       ],
+       "session_id": "my_session_123"
+     }'
 ```
 
 #### Postman Example
@@ -161,10 +211,24 @@ curl -X POST http://localhost:5000/rag/chat \
 2. **URL:** `http://localhost:5000/rag/chat`
 3. **Headers:**
    - `Content-Type: application/json`
-4. **Body (raw JSON):**
+4. **Body (raw JSON) - Simple format:**
    ```json
    {
      "question": "What is an Op-amp?",
+     "top_k": 5,
+     "use_query_expansion": true
+   }
+   ```
+   
+   **Body (raw JSON) - Conversation format:**
+   ```json
+   {
+     "messages": [
+       {"role": "user", "content": "What is an Op-amp?"},
+       {"role": "assistant", "content": "An operational amplifier..."},
+       {"role": "user", "content": "How does it work?"}
+     ],
+     "session_id": "my_session_123",
      "top_k": 5,
      "use_query_expansion": true
    }
@@ -240,43 +304,66 @@ This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: 
 }
 ```
 
-**JavaScript Example (Handling SSE Stream):**
+**JavaScript Example (Handling SSE Stream with Conversation):**
 
 ```javascript
-const eventSource = new EventSource("http://localhost:5000/rag/chat", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ question: "What is an Op-amp?" }),
-});
+// Initialize conversation
+let sessionId = `session_${Date.now()}`;
+let conversationHistory = [];
 
-let metadata = null;
-let answer = "";
+async function askQuestion(question) {
+  // Add user message to history
+  conversationHistory.push({ role: "user", content: question });
+  
+  const response = await fetch("http://localhost:5000/rag/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: conversationHistory,
+      session_id: sessionId
+    }),
+  });
 
-eventSource.addEventListener("metadata", (e) => {
-  metadata = JSON.parse(e.data);
-  console.log("Sources:", metadata.sources);
-  console.log("Used queries:", metadata.used_queries);
-});
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let metadata = null;
+  let answer = "";
 
-eventSource.addEventListener("message", (e) => {
-  if (e.data !== "[DONE]") {
-    // Content is JSON-encoded to preserve newlines
-    const token = JSON.parse(e.data);
-    answer += token;
-    // Update UI with streaming answer
-    document.getElementById("answer").textContent = answer;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("event: metadata")) {
+        const nextLine = lines[++i];
+        if (nextLine && nextLine.startsWith("data: ")) {
+          metadata = JSON.parse(nextLine.substring(6));
+          console.log("Sources:", metadata.sources);
+        }
+      } else if (line.startsWith("data: ")) {
+        const data = line.substring(6);
+        if (data === "[DONE]") {
+          // Add assistant response to history
+          conversationHistory.push({ role: "assistant", content: answer });
+          console.log("Stream complete. Final answer:", answer);
+          break;
+        } else {
+          // Content is JSON-encoded to preserve newlines
+          const token = JSON.parse(data);
+          answer += token;
+          // Update UI with streaming answer
+          document.getElementById("answer").textContent = answer;
+        }
+      }
+    }
   }
-});
-
-eventSource.addEventListener("done", () => {
-  eventSource.close();
-  console.log("Stream complete. Final answer:", answer);
-});
-
-eventSource.addEventListener("error", (e) => {
-  console.error("Stream error:", e.data);
-  eventSource.close();
-});
+}
 ```
 
 **Note:** The answer tokens are streamed incrementally. Concatenate all `data:` events (except the `[DONE]` event) to reconstruct the full answer. The answer includes inline citations (e.g., `[2]`, `[8]`) that correspond to the sources in the metadata.
@@ -288,6 +375,14 @@ Missing question:
 ```json
 {
   "error": "'question' must be non-empty."
+}
+```
+
+Empty messages array:
+
+```json
+{
+  "error": "'messages' array cannot be empty."
 }
 ```
 
@@ -330,21 +425,67 @@ Groq API error:
 
 **Description:** Chat endpoint that retrieves ALL slides from specified deck(s) and attaches them to every prompt. Unlike the RAG chat endpoint, this does NOT perform semantic search - it simply loads all slides from the deck(s) and includes them in the context for every question. Use this when you want to chat about specific slide decks without selective retrieval. Returns a streaming response via Server-Sent Events (SSE).
 
-**Request Body:**
+**Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
+
+**Request Body (Simple Format - Single Turn):**
 
 ```json
 {
-  "question": "Explain the concept from slide 5", // Required
+  "question": "Explain the concept from slide 5", // Required (if messages not provided)
   "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"] // Required: array of deck IDs
+}
+```
+
+**Request Body (Conversation Format - Multi-Turn):**
+
+```json
+{
+  "messages": [ // Required (if question not provided)
+    {"role": "user", "content": "Explain the concept from slide 5"},
+    {"role": "assistant", "content": "The concept from slide 5 is..."},
+    {"role": "user", "content": "What about slide 10?"}
+  ],
+  "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"], // Required: array of deck IDs
+  "session_id": "session_123" // Optional: for conversation management
 }
 ```
 
 **Parameters:**
 
-- `question` (required): The question to ask
+- `question` (required if `messages` not provided): The question to ask (single-turn mode)
+- `messages` (required if `question` not provided): Array of conversation messages with `role` ("user" or "assistant") and `content` (string). Frontend should send full conversation history each time.
 - `deck_ids` (required): Array of deck IDs to retrieve slides from (get these from `/rag/ingest-slides`)
+- `session_id` (optional): Unique identifier for conversation session. Enables automatic conversation management with fixed window (30 messages) and rollup memory for older messages.
 
-#### cURL Example
+**Conversation Management:**
+
+When `session_id` is provided, the backend automatically:
+- Keeps the last 30 messages (15 turns) as raw conversation history
+- Compresses older messages into rollup memory when the limit is exceeded
+- Includes rollup memory as context in every request
+- Stores assistant responses automatically
+
+**Important Requirements:**
+
+⚠️ **Critical:** The `messages` array **cannot be empty**. If you send an empty array `[]`, the backend will return an error: `"'messages' array cannot be empty."`
+
+**For new chats, you have two options:**
+1. **Use single-turn mode:** Send `{"question": "your question", "session_id": "chat_id", "deck_ids": [...]}` (recommended for first message)
+2. **Use messages format:** Send `{"messages": [{"role": "user", "content": "your question"}], "session_id": "chat_id", "deck_ids": [...]}` (must have at least 1 message)
+
+**Message Format:**
+
+Each message in the `messages` array must have:
+- `role`: Either `"user"` or `"assistant"`
+- `content`: The message text (string)
+
+**System messages are automatically filtered:** Any messages with `role: "system"` in the `messages` array are ignored and not stored in the session.
+
+**See the [Conversation Management: Detailed Behavior](#conversation-management-detailed-behavior) section below for complete scenario breakdowns.**
+
+#### cURL Examples
+
+**Single-turn (simple):**
 
 ```bash
 curl -X POST http://localhost:5000/rag/deck-chat \
@@ -355,17 +496,46 @@ curl -X POST http://localhost:5000/rag/deck-chat \
      }'
 ```
 
+**Multi-turn with conversation history:**
+
+```bash
+curl -X POST http://localhost:5000/rag/deck-chat \
+     -H "Content-Type: application/json" \
+     -d '{
+       "messages": [
+         {"role": "user", "content": "What are the main topics?"},
+         {"role": "assistant", "content": "The main topics are..."},
+         {"role": "user", "content": "Explain topic 1 in detail"}
+       ],
+       "deck_ids": ["pptx_deck_abc123"],
+       "session_id": "my_session_123"
+     }'
+```
+
 #### Postman Example
 
 1. **Method:** `POST`
 2. **URL:** `http://localhost:5000/rag/deck-chat`
 3. **Headers:**
    - `Content-Type: application/json`
-4. **Body (raw JSON):**
+4. **Body (raw JSON) - Simple format:**
    ```json
    {
      "question": "What are the main topics covered in these slides?",
      "deck_ids": ["pptx_deck_abc123"]
+   }
+   ```
+   
+   **Body (raw JSON) - Conversation format:**
+   ```json
+   {
+     "messages": [
+       {"role": "user", "content": "What are the main topics?"},
+       {"role": "assistant", "content": "The main topics are..."},
+       {"role": "user", "content": "Explain topic 1 in detail"}
+     ],
+     "deck_ids": ["pptx_deck_abc123"],
+     "session_id": "my_session_123"
    }
    ```
 
@@ -430,47 +600,62 @@ This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: 
 }
 ```
 
-**JavaScript Example (Handling SSE Stream):**
+**JavaScript Example (Handling SSE Stream with Conversation):**
 
 ```javascript
-const response = await fetch("http://localhost:5000/rag/deck-chat", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    question: "What are the main topics covered in these slides?",
-    deck_ids: ["pptx_deck_abc123"],
-  }),
-});
+// Initialize conversation
+let sessionId = `session_${Date.now()}`;
+let conversationHistory = [];
 
-const reader = response.body.getReader();
-const decoder = new TextDecoder();
-let metadata = null;
-let answer = "";
+async function askDeckQuestion(question, deckIds) {
+  // Add user message to history
+  conversationHistory.push({ role: "user", content: question });
+  
+  const response = await fetch("http://localhost:5000/rag/deck-chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: conversationHistory,
+      deck_ids: deckIds,
+      session_id: sessionId
+    }),
+  });
 
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let metadata = null;
+  let answer = "";
 
-  const chunk = decoder.decode(value);
-  const lines = chunk.split("\n");
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
 
-  for (const line of lines) {
-    if (line.startsWith("event: metadata")) {
-      const nextLine = lines[lines.indexOf(line) + 1];
-      if (nextLine.startsWith("data: ")) {
-        metadata = JSON.parse(nextLine.substring(6));
-        console.log("Sources:", metadata.sources);
-      }
-    } else if (line.startsWith("data: ")) {
-      const data = line.substring(6);
-      if (data === "[DONE]") {
-        console.log("Stream complete");
-        break;
-      } else {
-        // Content is JSON-encoded to preserve newlines
-        const token = JSON.parse(data);
-        answer += token;
-        // Update UI with streaming answer
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("event: metadata")) {
+        const nextLine = lines[++i];
+        if (nextLine && nextLine.startsWith("data: ")) {
+          metadata = JSON.parse(nextLine.substring(6));
+          console.log("Sources:", metadata.sources);
+        }
+      } else if (line.startsWith("data: ")) {
+        const data = line.substring(6);
+        if (data === "[DONE]") {
+          // Add assistant response to history
+          conversationHistory.push({ role: "assistant", content: answer });
+          console.log("Stream complete. Final answer:", answer);
+          break;
+        } else {
+          // Content is JSON-encoded to preserve newlines
+          const token = JSON.parse(data);
+          answer += token;
+          // Update UI with streaming answer
+        }
       }
     }
   }
@@ -486,6 +671,14 @@ Missing question:
 ```json
 {
   "error": "'question' must be non-empty."
+}
+```
+
+Empty messages array:
+
+```json
+{
+  "error": "'messages' array cannot be empty."
 }
 ```
 
@@ -902,20 +1095,84 @@ Groq API error (500):
 
 **Description:** Direct LLM query without RAG context. Uses general circuit design knowledge. Does not use ingested documents. Returns a streaming response via Server-Sent Events (SSE).
 
-**Request Body:**
+**Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
+
+**Request Body (Simple Format - Single Turn):**
 
 ```json
 {
-  "prompt": "Explain how a transistor works" // Required
+  "prompt": "Explain how a transistor works" // Required (if messages not provided)
 }
 ```
 
-#### cURL Example
+**Request Body (Conversation Format - Multi-Turn):**
+
+```json
+{
+  "messages": [ // Required (if prompt not provided)
+    {"role": "user", "content": "Explain how a transistor works"},
+    {"role": "assistant", "content": "A transistor is a semiconductor device..."},
+    {"role": "user", "content": "What are the different types?"}
+  ],
+  "session_id": "session_123" // Optional: for conversation management
+}
+```
+
+**Parameters:**
+
+- `prompt` (required if `messages` not provided): The prompt/question to send (single-turn mode)
+- `messages` (required if `prompt` not provided): Array of conversation messages with `role` ("user" or "assistant") and `content` (string). Frontend should send full conversation history each time.
+- `session_id` (optional): Unique identifier for conversation session. Enables automatic conversation management with fixed window (30 messages) and rollup memory for older messages.
+
+**Conversation Management:**
+
+When `session_id` is provided, the backend automatically:
+- Keeps the last 30 messages (15 turns) as raw conversation history
+- Compresses older messages into rollup memory when the limit is exceeded
+- Includes rollup memory as context in every request
+- Stores assistant responses automatically
+
+**Important Requirements:**
+
+⚠️ **Critical:** The `messages` array **cannot be empty**. If you send an empty array `[]`, the backend will return an error: `"'messages' array cannot be empty."`
+
+**For new chats, you have two options:**
+1. **Use single-turn mode:** Send `{"prompt": "your prompt", "session_id": "chat_id"}` (recommended for first message)
+2. **Use messages format:** Send `{"messages": [{"role": "user", "content": "your prompt"}], "session_id": "chat_id"}` (must have at least 1 message)
+
+**Message Format:**
+
+Each message in the `messages` array must have:
+- `role`: Either `"user"` or `"assistant"`
+- `content`: The message text (string)
+
+**System messages are automatically filtered:** Any messages with `role: "system"` in the `messages` array are ignored and not stored in the session.
+
+**See the [Conversation Management: Detailed Behavior](#conversation-management-detailed-behavior) section below for complete scenario breakdowns.**
+
+#### cURL Examples
+
+**Single-turn (simple):**
 
 ```bash
 curl -X POST http://localhost:5000/groq/general-llm \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Explain how a transistor works"}'
+```
+
+**Multi-turn with conversation history:**
+
+```bash
+curl -X POST http://localhost:5000/groq/general-llm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Explain how a transistor works"},
+      {"role": "assistant", "content": "A transistor is..."},
+      {"role": "user", "content": "What are the different types?"}
+    ],
+    "session_id": "my_session_123"
+  }'
 ```
 
 **Response Format:**
@@ -936,43 +1193,60 @@ This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: 
    data: [DONE]
    ```
 
-**JavaScript Example (Handling SSE Stream):**
+**JavaScript Example (Handling SSE Stream with Conversation):**
 
 ```javascript
-const response = await fetch("http://localhost:5000/groq/general-llm", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ prompt: "Explain how a transistor works" }),
-});
+// Initialize conversation
+let sessionId = `session_${Date.now()}`;
+let conversationHistory = [];
 
-const reader = response.body.getReader();
-const decoder = new TextDecoder();
-let answer = "";
+async function askQuestion(prompt) {
+  // Add user message to history
+  conversationHistory.push({ role: "user", content: prompt });
+  
+  const response = await fetch("http://localhost:5000/groq/general-llm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: conversationHistory,
+      session_id: sessionId
+    }),
+  });
 
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer = "";
 
-  const chunk = decoder.decode(value);
-  const lines = chunk.split("\n");
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
 
-  for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      const data = line.substring(6);
-      if (data === "[DONE]") {
-        console.log("Stream complete");
-        break;
-      } else {
-        // Content is JSON-encoded to preserve newlines
-        const token = JSON.parse(data);
-        answer += token;
-        // Update UI with streaming answer
-        document.getElementById("answer").textContent = answer;
-      }
-    } else if (line.startsWith("event: error")) {
-      const nextLine = lines[lines.indexOf(line) + 1];
-      if (nextLine.startsWith("data: ")) {
-        console.error("Error:", nextLine.substring(6));
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("data: ")) {
+        const data = line.substring(6);
+        if (data === "[DONE]") {
+          // Add assistant response to history
+          conversationHistory.push({ role: "assistant", content: answer });
+          console.log("Stream complete. Final answer:", answer);
+          break;
+        } else {
+          // Content is JSON-encoded to preserve newlines
+          const token = JSON.parse(data);
+          answer += token;
+          // Update UI with streaming answer
+          document.getElementById("answer").textContent = answer;
+        }
+      } else if (line.startsWith("event: error")) {
+        const nextLine = lines[++i];
+        if (nextLine && nextLine.startsWith("data: ")) {
+          console.error("Error:", nextLine.substring(6));
+        }
       }
     }
   }
@@ -989,6 +1263,14 @@ Missing prompt (400):
 }
 ```
 
+Empty messages array (400):
+
+```json
+{
+  "error": "'messages' array cannot be empty."
+}
+```
+
 LLM not configured (500):
 
 ```json
@@ -998,6 +1280,233 @@ LLM not configured (500):
 ```
 
 **Note:** This endpoint does not use the ingested documents and provides general knowledge responses based on the LLM's training data. The response is streamed token-by-token for real-time display.
+
+---
+
+## Conversation Management: Detailed Behavior
+
+All three chat endpoints (`/rag/chat`, `/rag/deck-chat`, `/groq/general-llm`) support the same conversation management pattern. This section explains the exact backend behavior in different scenarios.
+
+### How It Works
+
+**Fixed Window + Rollup Strategy:**
+- **Raw Messages Window:** The backend keeps the last **30 messages** (15 turns) in raw format
+- **Rollup Memory:** Messages older than 30 are compressed into a single rollup memory string
+- **Automatic Management:** When the limit is exceeded, the oldest messages are automatically rolled up
+
+**Message Flow:**
+1. Frontend sends full conversation history in `messages` array (stateless pattern)
+2. Backend syncs session with the provided messages
+3. If messages > 30: oldest messages are rolled up, last 30 kept as raw
+4. LLM receives: `[system_prompt, rollup_memory (if exists), last_30_messages]`
+5. Assistant response is automatically stored in session
+
+### Scenario Breakdown
+
+#### Scenario 1: New Chat (First Message)
+
+**Frontend sends:**
+```json
+{
+  "question": "What is an op-amp?",
+  "session_id": "chat_123"
+}
+```
+OR
+```json
+{
+  "messages": [{"role": "user", "content": "What is an op-amp?"}],
+  "session_id": "chat_123"
+}
+```
+
+**Backend behavior:**
+- Creates new session: `session.messages = []`, `rollup_memory = None`
+- Stores user message: `session.messages = [user_msg]`
+- No rollup needed (1 message < 30)
+- LLM receives: `[system_prompt, user_message]`
+- After response: `session.messages = [user_msg, assistant_msg]` (2 messages)
+
+**⚠️ Error if you send:** `{"messages": [], "session_id": "chat_123"}` → Returns error: `"'messages' array cannot be empty."`
+
+---
+
+#### Scenario 2: Old Chat - 13th Message
+
+**Frontend sends:**
+```json
+{
+  "messages": [
+    // 12 previous messages (6 turns)
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."},
+    // ... 10 more messages
+    {"role": "user", "content": "New question"}  // 13th message
+  ],
+  "session_id": "chat_123"
+}
+```
+
+**Backend behavior:**
+- Retrieves existing session (may have previous messages + rollup)
+- Filters system messages: 13 conversation messages
+- Checks: `13 > 30?` → **No**, no rollup needed
+- Syncs session: `session.messages = [all 13 messages]`
+- LLM receives: `[system_prompt, rollup_memory (if exists), 13_messages]`
+- After response: `session.messages = [14 messages]` (7 turns)
+
+---
+
+#### Scenario 3: Old Chat - 32nd Message
+
+**Frontend sends:**
+```json
+{
+  "messages": [
+    // 30 previous messages (15 turns)
+    // ... 30 messages ...
+    {"role": "user", "content": "New question"}  // 31st message
+  ],
+  "session_id": "chat_123"
+}
+```
+
+**Backend behavior:**
+- Retrieves existing session
+- Filters system messages: 31 conversation messages
+- Checks: `31 > 30?` → **Yes**, rollup triggered
+- Calculates overflow: `overflow_count = 31 - 30 = 1`
+- Rollup process:
+  - Takes first 1 message: `messages_to_rollup = [oldest_message]`
+  - Generates rollup: `new_rollup = rollup_generator(existing_rollup + 1_message)`
+  - Updates: `session.rollup_memory = new_rollup`
+- Keeps last 30: `session.messages = messages[1:31]` (last 30 messages)
+- LLM receives: `[system_prompt, rollup_memory, last_30_messages]`
+- After response: `session.messages = [31 messages]` → Next message will trigger rollup again
+
+**Note:** Only the overflow messages (31 - 30 = 1 in this case) are rolled up. The rollup includes both the existing rollup memory (if any) and the new overflow messages.
+
+---
+
+#### Scenario 4: After Browser Restart / Server Restart
+
+**Frontend sends:**
+```json
+{
+  "messages": [
+    // 10 messages loaded from database
+    // ... 10 messages ...
+    {"role": "user", "content": "New question"}  // 11th message
+  ],
+  "session_id": "chat_123"  // Same chat ID
+}
+```
+
+**Backend behavior:**
+
+**Case A: Server Still Running (Session in Memory)**
+- Finds existing session in memory
+- May have rollup memory from previous conversation
+- Processes all 11 messages as in Scenario 2
+- Works seamlessly
+
+**Case B: Server Restarted (Session Lost)**
+- Session not found → Creates new session: `session.messages = []`, `rollup_memory = None`
+- Since frontend sends full history, session syncs: `session.messages = [all 11 messages]`
+- No rollup needed (11 < 30)
+- LLM receives: `[system_prompt, 11_messages]` (no rollup since it was lost)
+- **Important:** Rollup memory is lost on server restart, but frontend's full history restores context
+
+**Key Point:** The frontend sending full conversation history each time ensures the backend always has complete context, even if the server restarts and loses session state.
+
+---
+
+### Rollup Memory Details
+
+**When Rollup Happens:**
+- Triggered when `len(conversation_messages) > 30`
+- Only the overflow messages are rolled up: `overflow_count = total_messages - 30`
+- Example: 35 messages → first 5 messages rolled up, last 30 kept raw
+
+**Rollup Generation:**
+- Takes existing `rollup_memory` (if any) + overflow messages
+- Sends to LLM with rollup prompt to generate compressed memory
+- New rollup replaces old rollup (accumulates context)
+- Format: Structured memory block with Summary, Decisions, Constraints, Open Loops, References
+
+**Rollup in LLM Context:**
+- Rollup memory is included as a synthetic user message: `[Previous conversation context]\n{rollup_memory}`
+- Appears before the raw messages in the LLM prompt
+- Allows LLM to maintain context from older conversations
+
+---
+
+### Session Persistence
+
+**Current Implementation:**
+- **In-Memory Only:** Sessions are stored in server memory
+- **Lost on Restart:** If the server restarts, all sessions are lost
+- **Recovery:** Frontend sending full history allows session recovery, but rollup memory is regenerated
+
+**Best Practices:**
+1. **Frontend should always send full conversation history** from database
+2. **Use consistent `session_id`** (e.g., database chat ID)
+3. **Don't rely on backend session persistence** - treat backend as stateless
+4. **Store conversation history in your database** - backend session is for optimization only
+
+---
+
+### Frontend Integration Guide
+
+**Recommended Pattern:**
+
+```javascript
+// 1. New Chat
+const newChat = {
+  question: "First question",  // Use question field for first message
+  session_id: chatId
+};
+
+// 2. Subsequent Messages
+const existingChat = {
+  messages: [
+    ...conversationHistoryFromDB,  // Load from your database
+    { role: "user", content: "New question" }  // Add current message
+  ],
+  session_id: chatId  // Same chat ID from database
+};
+
+// 3. After Browser Restart
+// Load conversationHistory from database, then send as above
+const restoredChat = {
+  messages: conversationHistoryFromDB,  // Full history from DB
+  session_id: chatId  // Same chat ID
+};
+```
+
+**Error Handling:**
+- If you send empty `messages: []`, backend returns 400 error
+- Always include at least 1 message, or use `question` field for first message
+- System messages (`role: "system"`) are automatically filtered
+
+---
+
+### Summary Table
+
+| Scenario | Messages Sent | Backend Action | Rollup? | LLM Context |
+|----------|--------------|----------------|---------|-------------|
+| New Chat | `question` or `[1 msg]` | Create session, store 1 msg | No | System + 1 msg |
+| 13th Message | `[13 msgs]` | Sync session, store all 13 | No | System + (rollup?) + 13 msgs |
+| 32nd Message | `[31 msgs]` | Rollup 1, keep 30 | Yes | System + rollup + 30 msgs |
+| After Restart (server running) | `[N msgs]` | Use existing session | Depends | System + rollup + last 30 |
+| After Restart (server restarted) | `[N msgs]` | Create new session | Depends | System + (new rollup?) + last 30 |
+
+**Key Takeaways:**
+- Backend maintains last 30 messages in raw format
+- Older messages compressed into rollup memory
+- Frontend should send full history each time (stateless pattern)
+- Session persistence is for optimization, not reliability
+- Empty messages array will error - use `question` field or at least 1 message
 
 ---
 

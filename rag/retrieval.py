@@ -43,7 +43,7 @@
 #    - Pages → per-page retrieval, used as-is
 
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import logging
 import json
 import chromadb
@@ -57,6 +57,8 @@ from config import (
 from .prompts import CIRCUIT_TUTOR_SYSTEM_PROMPT, QUERY_EXPANSION_SYSTEM_PROMPT
 from .embeddings import LocalEmbeddingFunction
 from utils.llm_utils import create_groq_client
+from utils.conversation_storage import get_storage
+from utils.conversation_builder import build_conversation_messages
 
 # Initialize clients
 groq_client = create_groq_client(GROQ_API_KEY)
@@ -293,7 +295,8 @@ def build_slides_context(slides: List[Dict[str, Any]]) -> str:
 
 # Formats contexts into prompt for Groq
 # Includes source citations (page numbers or slide numbers)
-def build_prompt(question: str, contexts: List[Dict]) -> List[Dict]:
+def build_prompt(question: str, contexts: List[Dict], session_id: Optional[str] = None, 
+                messages_array: Optional[List[Dict]] = None) -> List[Dict]:
     # 1. Format contexts with numbered citations
     lines = []
     for i, c in enumerate(contexts, start=1):
@@ -318,19 +321,43 @@ def build_prompt(question: str, contexts: List[Dict]) -> List[Dict]:
         "mapping to the sources in CONTEXT."
     )
     
-    # 3. Construct messages for Groq
-    system_msg = {"role": "system", "content": CIRCUIT_TUTOR_SYSTEM_PROMPT}
-    context_msg = {"role": "system", "content": f"CONTEXT:\n{context_block}"}
-    user_msg = {
+    # 3. Build base messages (system prompt + context)
+    base_messages = [
+        {"role": "system", "content": CIRCUIT_TUTOR_SYSTEM_PROMPT},
+        {"role": "system", "content": f"CONTEXT:\n{context_block}"}
+    ]
+    
+    # 4. Build conversation messages with rollup memory (handles session management)
+    # Note: We pass question as user_message for incremental mode, and the shared function
+    # will remove it from the end if present, so we can safely add the formatted version
+    messages = build_conversation_messages(
+        session_id=session_id,
+        user_message=question if not messages_array else None,
+        messages_array=messages_array,
+        base_messages=base_messages
+    )
+    
+    # 5. Add formatted question as user message (with instructions)
+    # If messages_array was provided, the raw question may already be in messages from session.messages
+    # The shared function removes the raw question in incremental mode, but if messages_array
+    # was provided and includes the raw question, we need to replace it with the formatted version
+    # Remove the last message if it's a raw user message matching the question
+    if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == question:
+        messages.pop()
+    
+    # Add formatted question with instructions
+    messages.append({
         "role": "user",
         "content": f"{instructions}\n\nQuestion: {question}"
-    }
-    return [system_msg, context_msg, user_msg]
+    })
+    
+    return messages
 
 
 # Generates answer using Groq with retrieved context
 # Returns answer or error dict
-def generate_answer(question: str, contexts: List[Dict], metadata: Dict = None):
+def generate_answer(question: str, contexts: List[Dict], metadata: Dict = None,
+                   session_id: Optional[str] = None, messages_array: Optional[List[Dict]] = None):
     if groq_client is None:
         return {"error": "GROQ_API_KEY is missing or invalid."}
     
@@ -339,8 +366,8 @@ def generate_answer(question: str, contexts: List[Dict], metadata: Dict = None):
 
     print("Question is: ", question, "\n\n")
     
-    # 1. Build prompt
-    messages = build_prompt(question, contexts)
+    # 1. Build prompt with conversation history support
+    messages = build_prompt(question, contexts, session_id=session_id, messages_array=messages_array)
     
     # 2. Call Groq API
     try:
@@ -353,7 +380,11 @@ def generate_answer(question: str, contexts: List[Dict], metadata: Dict = None):
     except Exception as e:
         return {"error": f"Groq API error: {str(e)}"}
     
+    # Accumulator for storing full assistant response
+    assistant_response = ""
+    
     def SSE():
+        nonlocal assistant_response
         # Send metadata first if provided
         if metadata:
             yield f"event: metadata\ndata: {json.dumps(metadata)}\n\n"
@@ -364,11 +395,18 @@ def generate_answer(question: str, contexts: List[Dict], metadata: Dict = None):
                 if content:
                     # Convert em-spaces to newlines as safety measure
                     content = content.replace('\u2003', '\n')
+                    assistant_response += content
                     yield f"data: {json.dumps(content)}\n\n"
         except Exception as e:
             yield f"event: error\ndata: {str(e)}\n\n"
-
-        yield "event: done\ndata: [DONE]\n\n"
+        finally:
+            # Store assistant response in session if session_id is provided
+            if session_id and assistant_response:
+                storage = get_storage()
+                # Question is already stored in build_prompt for incremental mode
+                storage.add_message(session_id, "assistant", assistant_response)
+            
+            yield "event: done\ndata: [DONE]\n\n"
 
     return Response(
         SSE(),
