@@ -54,7 +54,7 @@ from config import (
     CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL_NAME,
     GROQ_API_KEY, GROQ_MODEL
 )
-from .prompts import CIRCUIT_TUTOR_SYSTEM_PROMPT, QUERY_EXPANSION_SYSTEM_PROMPT
+from .prompts import CIRCUIT_TUTOR_SYSTEM_PROMPT, QUERY_EXPANSION_SYSTEM_PROMPT, QUERY_REFORMULATION_SYSTEM_PROMPT
 from .embeddings import LocalEmbeddingFunction
 from utils.llm_utils import create_groq_client
 from utils.conversation_storage import get_storage
@@ -122,6 +122,91 @@ def expand_query_via_groq(
     except Exception as e:
         logger.warning(f"Query expansion failed: {e}")
         return []
+
+
+# Reformulates contextual or ambiguous questions using conversation history
+# Converts questions like "What was my previous question?" or "Which is better?" into standalone queries
+def reformulate_query_with_context(
+    question: str,
+    conversation_history: Optional[List[Dict]] = None,
+    rollup_memory: Optional[str] = None
+) -> str:
+    # 1. Return question as-is if no context provided
+    if not conversation_history and not rollup_memory:
+        return question
+    
+    # 2. Check if question needs reformulation based on common contextual phrases
+    question_lower = question.lower().strip()
+    needs_reformulation_phrases = [
+        "previous", "first", "earlier", "before", "repeat",
+        "which is better", "compare", "what was", "what were",
+        "what did i ask", "what did i say", "earlier question",
+        "my question", "that question", "the question"
+    ]
+    
+    needs_reformulation = any(phrase in question_lower for phrase in needs_reformulation_phrases)
+    
+    if not needs_reformulation:
+        return question
+    
+    # 3. Build context text from rollup memory and recent messages
+    context_text = ""
+    if rollup_memory:
+        context_text += f"Previous conversation summary:\n{rollup_memory}\n\n"
+    
+    if conversation_history:
+        # Get recent conversation messages (last 8 messages, excluding system messages)
+        recent_messages = [msg for msg in conversation_history[-8:] if msg.get("role") != "system"]
+        if recent_messages:
+            context_text += "Recent conversation:\n"
+            for msg in recent_messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")[:300]  # Truncate to avoid token bloat
+                context_text += f"{role.title()}: {content}\n"
+    
+    if not context_text.strip():
+        return question
+    
+    # 4. Validate Groq client is available
+    if groq_client is None:
+        logger.warning("Groq client not available, skipping query reformulation")
+        return question
+    
+    # 5. Build reformulation prompt with context
+    reformulation_prompt = f"""User's current question: {question}
+
+{context_text}
+
+Reformulate the user's question into a standalone, specific query that can be answered using retrieved documents.
+If the question refers to something in the conversation history, replace it with the actual content.
+Return ONLY the reformulated question, nothing else (no explanations, no quotes, no additional text)."""
+    
+    # 6. Call Groq to reformulate the question
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": QUERY_REFORMULATION_SYSTEM_PROMPT},
+                {"role": "user", "content": reformulation_prompt},
+            ],
+            temperature=0.2,
+        )
+        
+        reformulated = resp.choices[0].message.content.strip()
+        
+        # 7. Clean up response (remove quotes, take first line only)
+        reformulated = reformulated.strip('"\'')
+        reformulated = reformulated.split('\n')[0].strip()
+        
+        # 8. Validate reformulation and return
+        if not reformulated or reformulated.lower() == question.lower():
+            return question
+        
+        return reformulated
+        
+    except Exception as e:
+        logger.warning(f"Query reformulation failed: {e}, using original question")
+        return question
 
 
 # Retrieves relevant chunks from ChromaDB

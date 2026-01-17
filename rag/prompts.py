@@ -33,6 +33,18 @@ QUERY_EXPANSION_SYSTEM_PROMPT = (
     "{context_section}"
 )
 
+# System prompt for query reformulation (Enhancement 2: Conversation-Aware Query Reformulation)
+QUERY_REFORMULATION_SYSTEM_PROMPT = (
+    "You are a query reformulation assistant. Your job is to reformulate ambiguous or contextual questions "
+    "into standalone, specific queries that can be answered using retrieved documents.\n\n"
+    "Rules:\n"
+    "- If the question refers to something in the conversation history, replace it with the actual content.\n"
+    "- Examples: 'What was my previous question?' → Extract the actual previous question\n"
+    "- Examples: 'Which is better?' → Extract what was being compared and reformulate as 'Which [X] is better for [Y]?'\n"
+    "- Make the reformulated question clear, specific, and self-contained.\n"
+    "- Return ONLY the reformulated question, nothing else (no explanations, no quotes)."
+)
+
 # System prompt for quiz generation (used in /rag/generate-quiz)
 QUIZ_GENERATION_SYSTEM_PROMPT = (
     "You are an expert quiz generator. Generate clear, accurate quiz questions based on the provided content. "

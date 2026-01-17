@@ -3,7 +3,7 @@ from flask import Blueprint, request, jsonify, Response
 import json
 
 from rag.ingest import ingest_directory
-from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client, build_slides_context
+from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client, build_slides_context, reformulate_query_with_context
 from rag.slide_ingest import ingest_pdf_deck, ingest_pptx_deck
 from rag.ocr_adapter import get_ocr_adapter
 from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt, DECK_CHAT_SYSTEM_PROMPT
@@ -84,7 +84,7 @@ def rag_chat():
     top_k = int(data.get("top_k", 5))
     expand = bool(data.get("use_query_expansion", True))
 
-    # 3.5. Extract conversation context for context-aware query expansion
+    # 3.5. Extract conversation context for context-aware query reformulation and expansion
     conversation_history = None
     rollup_memory = None
     if session_id:
@@ -99,10 +99,17 @@ def rag_chat():
         # No session_id but messages_array provided
         conversation_history = messages_array
 
+    # 3.6. Reformulate contextual questions using conversation history (Enhancement 2)
+    reformulated_question = reformulate_query_with_context(
+        question,
+        conversation_history=conversation_history,
+        rollup_memory=rollup_memory
+    )
+
     # 4. Retrieve relevant context chunks
     try:
         ctx, used_queries = retrieve_context(
-            question,
+            reformulated_question,  # Use reformulated question for retrieval
             top_k=top_k,
             use_query_expansion=expand,
             conversation_history=conversation_history,
@@ -203,7 +210,7 @@ def deck_chat():
     top_k = int(data.get("top_k", 5))
     expand = bool(data.get("use_query_expansion", True))
 
-    # 3.5. Extract conversation context for context-aware query expansion
+    # 3.5. Extract conversation context for context-aware query reformulation and expansion
     conversation_history = None
     rollup_memory = None
     if session_id:
@@ -218,10 +225,17 @@ def deck_chat():
         # No session_id but messages_array provided
         conversation_history = messages_array
 
+    # 3.6. Reformulate contextual questions using conversation history (Enhancement 2)
+    reformulated_question = reformulate_query_with_context(
+        question,
+        conversation_history=conversation_history,
+        rollup_memory=rollup_memory
+    )
+
     # 4. Retrieve relevant context using RAG (filtered to specified deck_ids)
     try:
         ctx, used_queries = retrieve_context(
-            question,
+            reformulated_question,  # Use reformulated question for retrieval
             top_k=top_k,
             use_query_expansion=expand,
             deck_ids=deck_ids,  # Filter to only search within specified decks
