@@ -1,8 +1,11 @@
 # Will create a centerlized, in memory, storage & session management system for the entire app
 # Now yes, I obviously could have saved the conversions in the database [for true persistence]
 # I do think it's much more performative, and to be honest, if this was truly a production grade app that I would have done
-# I would have created two N VPS instanced,  (e.g. 2 instances one main one backup) and a last resort DB call in case session could not be found
-# If i still have time, might implement the DB backup, if don't well. That's life for ya.
+# EDIT TO PREVIOUS COMMEENTS
+# I remembered that I actually did implemented saving the messages in the database when I started coding the app [4 months ago], I thought I used local storage
+# So, I guess logic would be:
+# Pass database chat id -> if session exists, golden, we keep on using it
+# If not, we create a new session.
 
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
