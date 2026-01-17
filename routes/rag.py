@@ -1,12 +1,23 @@
 # server/routes/rag.py
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
+import json
 
 from rag.ingest import ingest_directory
-from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client, build_slides_context
+from rag.retrieval import (
+    retrieve_context, 
+    generate_answer, 
+    groq_client, 
+    reformulate_query_with_context,
+    detect_question_type,
+    retrieve_context_by_type,
+    QuestionType
+)
 from rag.slide_ingest import ingest_pdf_deck, ingest_pptx_deck
 from rag.ocr_adapter import get_ocr_adapter
 from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt, DECK_CHAT_SYSTEM_PROMPT
 from utils.llm_utils import extract_json_object
+from utils.conversation_storage import get_storage
+from utils.conversation_builder import build_conversation_messages
 
 from config import GROQ_MODEL
 
@@ -38,36 +49,86 @@ def ingest():
 
 # RAG-powered chat endpoint with source citations
 # Retrieves relevant context, generates grounded answer using Groq, returns with sources
+# Supports conversation history via messages array and session_id
 @rag_bp.route("/chat", methods=["POST"])
 def rag_chat():
     # 1. Validate request is JSON
     if not request.is_json:
         return jsonify({"error": "Request must be JSON."}), 400
 
-    # 2. Parse and validate question parameter
+    # 2. Parse and validate parameters
     data = request.get_json(silent=True) or {}
+    
+    # Support both old format (question) and new format (messages + session_id)
     question = (data.get("question") or "").strip()
-    if not question:
-        return jsonify({
-            "error": "'question' must be non-empty."
-        }), 400
+    messages_array = data.get("messages")  # Optional: array of {role, content}
+    session_id = data.get("session_id")  # Optional: for conversation management
+    
+    # Validate input
+    if not question and not messages_array:
+        return jsonify({"error": "Either 'question' or 'messages' must be provided."}), 400
+    
+    # If messages_array provided, extract question from last user message
+    if messages_array:
+        if not isinstance(messages_array, list):
+            return jsonify({"error": "'messages' must be an array."}), 400
+        if not messages_array:
+            return jsonify({"error": "'messages' array cannot be empty."}), 400
+        # Validate message format
+        for msg in messages_array:
+            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
+                return jsonify({"error": "Each message must have 'role' and 'content' fields."}), 400
+        # Extract question from last user message
+        for msg in reversed(messages_array):
+            if msg.get("role") == "user":
+                question = msg.get("content", "").strip()
+                break
+        if not question:
+            return jsonify({"error": "No user message found in 'messages' array."}), 400
+    elif not question:
+        return jsonify({"error": "'question' must be non-empty."}), 400
 
     # 3. Parse optional parameters with defaults
     top_k = int(data.get("top_k", 5))
     expand = bool(data.get("use_query_expansion", True))
 
-    # 4. Retrieve relevant context chunks
+    # 3.5. Extract conversation context for context-aware query reformulation and expansion
+    conversation_history = None
+    rollup_memory = None
+    if session_id:
+        from utils.conversation_storage import get_storage
+        storage = get_storage()
+        session = storage.get_session(session_id)
+        if session:
+            rollup_memory = session.rollup_memory
+            # Use messages_array if provided, otherwise use session.messages
+            conversation_history = messages_array if messages_array else session.messages
+    elif messages_array:
+        # No session_id but messages_array provided
+        conversation_history = messages_array
+
+    # 3.6. Reformulate contextual questions using conversation history (Enhancement 2)
+    reformulated_question = reformulate_query_with_context(
+        question,
+        conversation_history=conversation_history,
+        rollup_memory=rollup_memory
+    )
+
+    # 3.7. Detect question type and route to appropriate retrieval (Enhancement 4)
+    question_type = detect_question_type(reformulated_question, conversation_history)
+
+    # 4. Retrieve relevant context chunks using type-specific strategy
     try:
-        ctx, used_queries = retrieve_context(
-            question,
+        ctx, used_queries = retrieve_context_by_type(
+            reformulated_question,
+            question_type=question_type,
             top_k=top_k,
-            use_query_expansion=expand
+            use_query_expansion=expand,
+            deck_ids=None,
+            conversation_history=conversation_history,
+            rollup_memory=rollup_memory
         )
-        # 5. Generate answer using Groq with retrieved context
-        gen = generate_answer(question, ctx)
-        if "error" in gen:
-            return jsonify({"error": gen["error"]}), 500
-        # 6. Extract sources for UI display
+        # 5. Extract sources for UI display
         sources = []
         for c in ctx:
             source_info = {"source": c.get("source", "unknown")}
@@ -81,13 +142,28 @@ def rag_chat():
             else:
                 source_info["page"] = c.get("page")
             sources.append(source_info)
-        # 7. Return response with answer and sources
-        return jsonify({
+        
+        # 6. Generate answer using Groq with retrieved context (returns Response for SSE)
+        metadata = {
             "question": question,
             "used_queries": used_queries,
-            "answer": gen["answer"],
             "sources": sources
-        }), 200
+        }
+        gen_response = generate_answer(
+            question, 
+            ctx, 
+            metadata=metadata,
+            session_id=session_id,
+            messages_array=messages_array
+        )
+        
+        # 7. Check if it's an error dict instead of Response
+        if isinstance(gen_response, dict) and "error" in gen_response:
+            return jsonify({"error": gen_response["error"]}), 500
+        
+        # 8. Return the SSE Response
+        return gen_response
+        
     except Exception as e:
         return jsonify({
             "error": "RAG pipeline failed",
@@ -95,8 +171,9 @@ def rag_chat():
         }), 500
 
 
-# Deck-based chat endpoint - retrieves ALL slides from specified decks
-# and attaches them to every prompt (no semantic search/RAG)
+# Deck-based chat endpoint - uses RAG to retrieve relevant slides from specified decks
+# Filters semantic search to only include chunks from the specified deck_ids
+# Supports conversation history via messages array and session_id
 @rag_bp.route("/deck-chat", methods=["POST"])
 def deck_chat():
     # 1. Validate request is JSON
@@ -105,11 +182,35 @@ def deck_chat():
 
     # 2. Parse and validate parameters
     data = request.get_json(silent=True) or {}
+    
+    # Support both old format (question) and new format (messages + session_id)
     question = (data.get("question") or "").strip()
-    if not question:
-        return jsonify({
-            "error": "'question' must be non-empty."
-        }), 400
+    messages_array = data.get("messages")  # Optional: array of {role, content}
+    session_id = data.get("session_id")  # Optional: for conversation management
+    
+    # Validate input
+    if not question and not messages_array:
+        return jsonify({"error": "Either 'question' or 'messages' must be provided."}), 400
+    
+    # If messages_array provided, extract question from last user message
+    if messages_array:
+        if not isinstance(messages_array, list):
+            return jsonify({"error": "'messages' must be an array."}), 400
+        if not messages_array:
+            return jsonify({"error": "'messages' array cannot be empty."}), 400
+        # Validate message format
+        for msg in messages_array:
+            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
+                return jsonify({"error": "Each message must have 'role' and 'content' fields."}), 400
+        # Extract question from last user message
+        for msg in reversed(messages_array):
+            if msg.get("role") == "user":
+                question = msg.get("content", "").strip()
+                break
+        if not question:
+            return jsonify({"error": "No user message found in 'messages' array."}), 400
+    elif not question:
+        return jsonify({"error": "'question' must be non-empty."}), 400
     
     deck_ids = data.get("deck_ids")
     if not deck_ids:
@@ -118,65 +219,89 @@ def deck_chat():
     if not isinstance(deck_ids, list) or len(deck_ids) == 0:
         return jsonify({"error": "'deck_ids' must be a non-empty array."}), 400
 
+    # 3. Parse optional parameters with defaults
+    top_k = int(data.get("top_k", 5))
+    expand = bool(data.get("use_query_expansion", True))
+
+    # 3.5. Extract conversation context for context-aware query reformulation and expansion
+    conversation_history = None
+    rollup_memory = None
+    if session_id:
+        from utils.conversation_storage import get_storage
+        storage = get_storage()
+        session = storage.get_session(session_id)
+        if session:
+            rollup_memory = session.rollup_memory
+            # Use messages_array if provided, otherwise use session.messages
+            conversation_history = messages_array if messages_array else session.messages
+    elif messages_array:
+        # No session_id but messages_array provided
+        conversation_history = messages_array
+
+    # 3.6. Reformulate contextual questions using conversation history (Enhancement 2)
+    reformulated_question = reformulate_query_with_context(
+        question,
+        conversation_history=conversation_history,
+        rollup_memory=rollup_memory
+    )
+
+    # 3.7. Detect question type and route to appropriate retrieval (Enhancement 4)
+    question_type = detect_question_type(reformulated_question, conversation_history)
+
+    # 4. Retrieve relevant context using RAG (filtered to specified deck_ids)
     try:
-        # 3. Retrieve ALL slides from specified decks (no semantic search)
-        slides = get_all_slides_from_decks(deck_ids)
-        
-        if not slides:
-            return jsonify({
-                "error": f"No slides found for deck_ids: {deck_ids}"
-            }), 404
-        
-        # 4. Format slides into context string
-        all_slides_content = build_slides_context(slides)
-        
-        # 5. Build messages for Groq
-        if groq_client is None:
-            return jsonify({"error": "GROQ_API_KEY is missing or invalid."}), 500
-        
-        messages = [
-            {
-                "role": "system",
-                "content": DECK_CHAT_SYSTEM_PROMPT
-            },
-            {
-                "role": "system",
-                "content": f"SLIDE DECK CONTENT:\n\n{all_slides_content}"
-            },
-            {
-                "role": "user",
-                "content": question
-            }
-        ]
-        
-        # 6. Generate answer using Groq
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            temperature=0.2,
+        ctx, used_queries = retrieve_context_by_type(
+            reformulated_question,
+            question_type=question_type,
+            top_k=top_k,
+            use_query_expansion=expand,
+            deck_ids=deck_ids,  # Filter to only search within specified decks
+            conversation_history=conversation_history,
+            rollup_memory=rollup_memory
         )
         
-        answer = response.choices[0].message.content.strip()
+        if not ctx:
+            return jsonify({
+                "error": f"No relevant content found for deck_ids: {deck_ids}"
+            }), 404
         
-        # 7. Format sources for response
+        # 5. Extract sources for UI display
         sources = []
-        for slide in slides:
-            sources.append({
-                "source": slide.get("deck_id"),
-                "slide_number": slide.get("slide_number"),
-                "slide_title": slide.get("slide_title", ""),
-                "chunk_type": "slide"
-            })
+        for c in ctx:
+            source_info = {"source": c.get("source", "unknown")}
+            if c.get("chunk_type") == "slide":
+                source_info["slide_number"] = c.get("slide_number")
+                source_info["chunk_type"] = "slide"
+            elif c.get("chunk_type") == "window":
+                source_info["start_slide"] = c.get("start_slide")
+                source_info["end_slide"] = c.get("end_slide")
+                source_info["chunk_type"] = "window"
+            else:
+                source_info["page"] = c.get("page")
+            sources.append(source_info)
         
-        # 8. Return response
-        return jsonify({
+        # 6. Generate answer using Groq with retrieved context (returns Response for SSE)
+        metadata = {
             "question": question,
             "deck_ids": deck_ids,
-            "total_slides": len(slides),
-            "answer": answer,
+            "used_queries": used_queries,
             "sources": sources
-        }), 200
-    
+        }
+        gen_response = generate_answer(
+            question, 
+            ctx, 
+            metadata=metadata,
+            session_id=session_id,
+            messages_array=messages_array
+        )
+        
+        # 7. Check if it's an error dict instead of Response
+        if isinstance(gen_response, dict) and "error" in gen_response:
+            return jsonify({"error": gen_response["error"]}), 500
+        
+        # 8. Return the SSE Response
+        return gen_response
+        
     except Exception as e:
         return jsonify({
             "error": "Deck chat failed",
@@ -335,17 +460,37 @@ def generate_quiz():
         return jsonify({"error": "'question_counts' must request at least one question (> 0)."}), 400
     
     try:
-
-        # 4. Get all slides from all specified decks
-        slides = get_all_slides_from_decks(deck_ids)
+        # 4. Use RAG to retrieve comprehensive content from specified decks
+        # For quiz generation, we use a broad query to get comprehensive coverage
+        # We use a high top_k to get more slides for better quiz coverage
+        quiz_query = quiz_description if quiz_description else "Generate comprehensive quiz questions covering all key concepts and topics"
         
-        if not slides:
+        # Retrieve context with high top_k for comprehensive coverage
+        ctx, used_queries = retrieve_context(
+            quiz_query,
+            top_k=30,  # Higher top_k for comprehensive quiz generation
+            use_query_expansion=True,
+            deck_ids=deck_ids  # Filter to only search within specified decks
+        )
+        
+        if not ctx:
             return jsonify({
-                "error": f"No slides found for deck_ids: {deck_ids}"
+                "error": f"No relevant content found for deck_ids: {deck_ids}"
             }), 404
         
-        # 5. Format all slides into context for LLM
-        all_content = build_slides_context(slides)
+        # 5. Format retrieved contexts into content string for LLM
+        # Build context similar to how build_slides_context works
+        all_content_parts = []
+        for c in ctx:
+            text = (c.get("text") or "").strip()
+            if text:
+                all_content_parts.append(text)
+        all_content = "\n\n---\n\n".join(all_content_parts).strip()
+        
+        if not all_content:
+            return jsonify({
+                "error": f"No content retrieved for deck_ids: {deck_ids}"
+            }), 404
         
         # 6. Build quiz generation prompt
         quiz_prompt = build_quiz_generation_prompt(
@@ -436,7 +581,7 @@ def generate_quiz():
         # 12. Return quiz in database-ready format
         return jsonify({
             "deck_ids": deck_ids,
-            "total_slides": len(slides),
+            "contexts_retrieved": len(ctx),
             "question_count": len(formatted_questions),
             "question_type": response_question_type,
             "question_counts": requested_counts,

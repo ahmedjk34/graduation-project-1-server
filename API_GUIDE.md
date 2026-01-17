@@ -8,6 +8,16 @@
 
 This API provides endpoints for ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB) and performing Retrieval-Augmented Generation (RAG) queries against the ingested content. The system uses local embeddings with sentence-transformers and Groq API for LLM generation. It also supports quiz generation from slide decks.
 
+**RAG Enhancements:** The system includes several intelligent enhancements:
+- **Context-Aware Query Expansion**: Uses conversation history to generate better search queries
+- **Conversation-Aware Query Reformulation**: Automatically reformulates contextual questions (e.g., "What was my previous question?") using conversation history
+- **Coding Question Decomposition**: Automatically breaks down coding questions into learning-focused sub-queries
+- **Question Type Detection & Routing**: Intelligently detects question types (coding, slide-specific, follow-up, comparative) and applies appropriate retrieval strategies
+- **Slide-Specific Retrieval**: Direct lookup for slide queries ("slide 17", "slides 1-10") instead of semantic search
+- **Context-Aware Answer Generation**: Uses conversation history for better answer continuity
+
+**Streaming Responses:** Several endpoints (`/rag/chat`, `/rag/deck-chat`, `/groq/general-llm`) use Server-Sent Events (SSE) to stream responses token-by-token for real-time display. See the [SSE Streaming](#server-sent-events-sse-streaming) section for details on handling these streams.
+
 ### Base URL
 
 ```
@@ -127,13 +137,38 @@ curl -X POST http://localhost:5000/rag/ingest \
 
 **Endpoint:** `POST /rag/chat`
 
-**Description:** Performs a RAG-powered query against the ingested documents. Retrieves relevant context chunks (from PDFs, slides, or both), generates an answer using Groq API, and returns the answer with source citations. Supports both page-based chunks (from regular PDFs) and slide chunks (from slide decks).
+**Description:** Performs a RAG-powered query against the ingested documents. Retrieves relevant context chunks (from PDFs, slides, or both), generates an answer using Groq API, and streams the answer with source citations via Server-Sent Events (SSE). Supports both page-based chunks (from regular PDFs) and slide chunks (from slide decks).
 
-**Request Body:**
+**Intelligent RAG Features:**
+- **Context-Aware Query Expansion**: Automatically expands queries using conversation history for better retrieval
+- **Query Reformulation**: Reformulates contextual questions (e.g., "What was my previous question?", "Which is better?") using conversation history
+- **Coding Question Decomposition**: For coding questions, automatically breaks down into learning-focused sub-queries (e.g., "Write I2C code for PIC18" → decomposes into language basics, hardware specs, protocol details, etc.)
+- **Question Type Detection**: Automatically detects question types and applies appropriate retrieval strategies
+- **Slide-Specific Queries**: Direct metadata lookup for slide queries (e.g., "slide 17", "slides 1-10") for precise results
+- **Context-Aware Answers**: Uses conversation history for better answer continuity and follow-up handling
+
+**Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
+
+**Request Body (Simple Format - Single Turn):**
 
 ```json
 {
-  "question": "What is an Op-amp?", // Required
+  "question": "What is an Op-amp?", // Required (if messages not provided)
+  "top_k": 5, // Optional, default: 5
+  "use_query_expansion": true // Optional, default: true
+}
+```
+
+**Request Body (Conversation Format - Multi-Turn):**
+
+```json
+{
+  "messages": [ // Required (if question not provided)
+    {"role": "user", "content": "What is an Op-amp?"},
+    {"role": "assistant", "content": "An operational amplifier (op-amp) is..."},
+    {"role": "user", "content": "How does it work in a circuit?"}
+  ],
+  "session_id": "session_123", // Optional: for conversation management
   "top_k": 5, // Optional, default: 5
   "use_query_expansion": true // Optional, default: true
 }
@@ -141,16 +176,49 @@ curl -X POST http://localhost:5000/rag/ingest \
 
 **Parameters:**
 
-- `question` (required): The question to ask
+- `question` (required if `messages` not provided): The question to ask (single-turn mode)
+- `messages` (required if `question` not provided): Array of conversation messages with `role` ("user" or "assistant") and `content` (string). Frontend should send full conversation history each time.
+- `session_id` (optional): Unique identifier for conversation session. Enables automatic conversation management with fixed window (30 messages) and rollup memory for older messages.
 - `top_k` (optional): Number of top results to retrieve per query (default: 5)
 - `use_query_expansion` (optional): Whether to use multi-query expansion for better recall (default: true)
 
-#### cURL Example
+**Conversation Management:**
+
+When `session_id` is provided, the backend automatically:
+- Keeps the last 30 messages (15 turns) as raw conversation history
+- Compresses older messages into rollup memory when the limit is exceeded
+- Includes rollup memory as context in every request
+- Stores assistant responses automatically
+
+**Message Format:**
+
+Each message in the `messages` array must have:
+- `role`: Either `"user"` or `"assistant"`
+- `content`: The message text (string)
+
+#### cURL Examples
+
+**Single-turn (simple):**
 
 ```bash
 curl -X POST http://localhost:5000/rag/chat \
      -H "Content-Type: application/json" \
      -d '{"question":"What is an Op-amp?"}'
+```
+
+**Multi-turn with conversation history:**
+
+```bash
+curl -X POST http://localhost:5000/rag/chat \
+     -H "Content-Type: application/json" \
+     -d '{
+       "messages": [
+         {"role": "user", "content": "What is an Op-amp?"},
+         {"role": "assistant", "content": "An operational amplifier..."},
+         {"role": "user", "content": "How does it work?"}
+       ],
+       "session_id": "my_session_123"
+     }'
 ```
 
 #### Postman Example
@@ -159,7 +227,7 @@ curl -X POST http://localhost:5000/rag/chat \
 2. **URL:** `http://localhost:5000/rag/chat`
 3. **Headers:**
    - `Content-Type: application/json`
-4. **Body (raw JSON):**
+4. **Body (raw JSON) - Simple format:**
    ```json
    {
      "question": "What is an Op-amp?",
@@ -167,13 +235,67 @@ curl -X POST http://localhost:5000/rag/chat \
      "use_query_expansion": true
    }
    ```
+   
+   **Body (raw JSON) - Conversation format:**
+   ```json
+   {
+     "messages": [
+       {"role": "user", "content": "What is an Op-amp?"},
+       {"role": "assistant", "content": "An operational amplifier..."},
+       {"role": "user", "content": "How does it work?"}
+     ],
+     "session_id": "my_session_123",
+     "top_k": 5,
+     "use_query_expansion": true
+   }
+   ```
 
-**Response:**
+**Response Format:**
+
+This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: text/event-stream`. The response consists of:
+
+1. **Metadata event** (sent first):
+
+   ```
+   event: metadata
+   data: {"question":"What is an Op-amp?","used_queries":["What is an Op-amp?","operational amplifier fundamentals",...],"sources":[...]}
+   ```
+
+2. **Token events** (streamed as they arrive):
+
+   ```
+   data: An **operational amplifier
+   data:  (op‑amp)** is a high‑gain
+   data:  differential amplifier...
+   ```
+
+3. **Done event** (sent when complete):
+   ```
+   event: done
+   data: [DONE]
+   ```
+
+**Response Fields (in metadata event):**
+
+- `question`: The original question asked
+- `sources`: Array of source objects containing:
+  - For page chunks: `source` (filename) and `page` (page number)
+  - For slide chunks: `source` (deck_id), `slide_number`, `chunk_type: "slide"`
+  - For window chunks: `source` (deck_id), `start_slide`, `end_slide`, `chunk_type: "window"`
+- `used_queries`: Array of queries used for retrieval (original question + expanded queries if query expansion was enabled)
+
+**Example Metadata Event Data:**
 
 ```json
 {
-  "answer": "An **operational amplifier (op‑amp)** is a high‑gain differential amplifier that can be configured with external passive components (resistors, capacitors, etc.) to perform mathematical operations such as addition, subtraction, integration, differentiation, and division on input signals.  Early op‑amps were built with vacuum‑tube stages and required high‑voltage supplies, but the basic idea—using a very large open‑loop gain and closing the loop with external components to obtain a desired transfer function—remains the same today[2].  \n\nIn modern practice the op‑amp is idealized with assumptions of zero input current, zero input offset voltage, infinite input impedance, zero output impedance, and infinite open‑loop gain, which make the analysis of op‑amp circuits straightforward[8].  ",
   "question": "What is an Op-amp?",
+  "used_queries": [
+    "What is an Op-amp?",
+    "operational amplifier fundamentals",
+    "op‑amp input and output characteristics",
+    "common op‑amp circuit configurations",
+    "applications of op‑amps in signal processing"
+  ],
   "sources": [
     {
       "page": 415,
@@ -194,26 +316,73 @@ curl -X POST http://localhost:5000/rag/chat \
       "page": 26,
       "source": "op_amps_everyone.pdf"
     }
-  ],
-  "used_queries": [
-    "What is an Op-amp?",
-    "operational amplifier fundamentals",
-    "op‑amp input and output characteristics",
-    "common op‑amp circuit configurations",
-    "applications of op‑amps in signal processing"
   ]
 }
 ```
 
-**Response Fields:**
+**JavaScript Example (Handling SSE Stream with Conversation):**
 
-- `question`: The original question asked
-- `answer`: The generated answer with inline citations (e.g., `[2]`, `[8]`)
-- `sources`: Array of source objects containing:
-  - For page chunks: `source` (filename) and `page` (page number)
-  - For slide chunks: `source` (deck_id), `slide_number`, `chunk_type: "slide"`
-  - For window chunks: `source` (deck_id), `start_slide`, `end_slide`, `chunk_type: "window"`
-- `used_queries`: Array of queries used for retrieval (original question + expanded queries if query expansion was enabled)
+```javascript
+// Initialize conversation
+let sessionId = `session_${Date.now()}`;
+let conversationHistory = [];
+
+async function askQuestion(question) {
+  // Add user message to history
+  conversationHistory.push({ role: "user", content: question });
+  
+  const response = await fetch("http://localhost:5000/rag/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: conversationHistory,
+      session_id: sessionId
+    }),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let metadata = null;
+  let answer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("event: metadata")) {
+        const nextLine = lines[++i];
+        if (nextLine && nextLine.startsWith("data: ")) {
+          metadata = JSON.parse(nextLine.substring(6));
+          console.log("Sources:", metadata.sources);
+        }
+      } else if (line.startsWith("data: ")) {
+        const data = line.substring(6);
+        if (data === "[DONE]") {
+          // Add assistant response to history
+          conversationHistory.push({ role: "assistant", content: answer });
+          console.log("Stream complete. Final answer:", answer);
+          break;
+        } else {
+          // Content is JSON-encoded to preserve newlines
+          const token = JSON.parse(data);
+          answer += token;
+          // Update UI with streaming answer
+          document.getElementById("answer").textContent = answer;
+        }
+      }
+    }
+  }
+}
+```
+
+**Note:** The answer tokens are streamed incrementally. Concatenate all `data:` events (except the `[DONE]` event) to reconstruct the full answer. The answer includes inline citations (e.g., `[2]`, `[8]`) that correspond to the sources in the metadata.
 
 **Error Responses:**
 
@@ -222,6 +391,14 @@ Missing question:
 ```json
 {
   "error": "'question' must be non-empty."
+}
+```
+
+Empty messages array:
+
+```json
+{
+  "error": "'messages' array cannot be empty."
 }
 ```
 
@@ -255,30 +432,133 @@ Groq API error:
 - The endpoint works with both page-based chunks (from `/rag/ingest`) and slide chunks (from `/rag/ingest-slides`)
 - For slide chunks, neighbor expansion is enabled by default (includes adjacent slides for context)
 - Sources may include a mix of pages, individual slides, and slide windows
+- **Coding questions** are automatically expanded into multiple sub-queries for comprehensive retrieval
+- **Slide-specific queries** (e.g., "Explain slide 17", "What's on slides 1-10") use direct metadata lookup for precise results
+- **Follow-up questions** (e.g., "What was my previous question?", "Which is better?") are automatically reformulated using conversation context
+
+**Example Enhanced Behaviors:**
+
+**1. Coding Question Decomposition:**
+```json
+{
+  "question": "Write I2C code for PIC18 temperature sensor",
+  "session_id": "session_123"
+}
+```
+The system automatically expands this into sub-queries like:
+- "What assembly language does PIC18 use?"
+- "How to create variables in PIC18?"
+- "I2C hardware in PIC18 example"
+- "I2C software in PIC18 example"
+- "Temperature sensor I2C protocol for PIC18"
+
+**2. Slide-Specific Queries:**
+```json
+{
+  "question": "Explain slide 17",
+  "session_id": "session_123"
+}
+```
+Uses direct metadata lookup to retrieve slide 17 exactly (not semantic search).
+
+**3. Follow-up Questions:**
+```json
+{
+  "messages": [
+    {"role": "user", "content": "What is an op amp?"},
+    {"role": "assistant", "content": "An operational amplifier..."},
+    {"role": "user", "content": "Which is better?"}
+  ],
+  "session_id": "session_123"
+}
+```
+The system automatically reformulates "Which is better?" to "Which op amp design is better for each use case?" using conversation context.
 
 ---
 
-### 4. Deck-Based Chat (No RAG)
+### 4. Deck-Based Chat
 
 **Endpoint:** `POST /rag/deck-chat`
 
-**Description:** Chat endpoint that retrieves ALL slides from specified deck(s) and attaches them to every prompt. Unlike the RAG chat endpoint, this does NOT perform semantic search - it simply loads all slides from the deck(s) and includes them in the context for every question. Use this when you want to chat about specific slide decks without selective retrieval.
+**Description:** Chat endpoint that uses RAG (Retrieval-Augmented Generation) to retrieve relevant slides from specified deck(s). Unlike the general `/rag/chat` endpoint, this endpoint filters semantic search to only include chunks from the specified deck_ids. This provides focused, deck-specific answers while still using intelligent semantic retrieval. Returns a streaming response via Server-Sent Events (SSE).
 
-**Request Body:**
+**Intelligent RAG Features (Same as `/rag/chat`):**
+- **Context-Aware Query Expansion**: Uses conversation history for better query expansion
+- **Query Reformulation**: Reformulates contextual questions using conversation history
+- **Coding Question Decomposition**: Automatically decomposes coding questions into sub-queries
+- **Question Type Detection**: Detects question types and applies appropriate strategies
+- **Slide-Specific Retrieval**: Direct lookup for slide queries ("slide 17", "slides 1-10", "slides 1 to 10")
+- **Context-Aware Answers**: Uses conversation history for better continuity
+
+**Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
+
+**Slide-Specific Query Examples:**
+- `"Explain slide 17"` → Direct lookup of slide 17
+- `"What's on slides 1-10"` → Direct lookup of slides 1 through 10
+- `"Show me slides 5 to 15"` → Direct lookup of slides 5 through 15
+- `"What did slide 3 say?"` → Direct lookup of slide 3
+
+**Request Body (Simple Format - Single Turn):**
 
 ```json
 {
-  "question": "Explain the concept from slide 5", // Required
+  "question": "Explain the concept from slide 5", // Required (if messages not provided)
   "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"] // Required: array of deck IDs
+}
+```
+
+**Request Body (Conversation Format - Multi-Turn):**
+
+```json
+{
+  "messages": [ // Required (if question not provided)
+    {"role": "user", "content": "Explain the concept from slide 5"},
+    {"role": "assistant", "content": "The concept from slide 5 is..."},
+    {"role": "user", "content": "What about slide 10?"}
+  ],
+  "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"], // Required: array of deck IDs
+  "session_id": "session_123" // Optional: for conversation management
 }
 ```
 
 **Parameters:**
 
-- `question` (required): The question to ask
-- `deck_ids` (required): Array of deck IDs to retrieve slides from (get these from `/rag/ingest-slides`)
+- `question` (required if `messages` not provided): The question to ask (single-turn mode)
+- `messages` (required if `question` not provided): Array of conversation messages with `role` ("user" or "assistant") and `content` (string). Frontend should send full conversation history each time.
+- `deck_ids` (required): Array of deck IDs to filter RAG search to (get these from `/rag/ingest-slides`)
+- `top_k` (optional): Number of top results to retrieve (default: 5)
+- `use_query_expansion` (optional): Whether to use query expansion for better retrieval (default: true)
+- `session_id` (optional): Unique identifier for conversation session. Enables automatic conversation management with fixed window (30 messages) and rollup memory for older messages.
 
-#### cURL Example
+**Conversation Management:**
+
+When `session_id` is provided, the backend automatically:
+- Keeps the last 30 messages (15 turns) as raw conversation history
+- Compresses older messages into rollup memory when the limit is exceeded
+- Includes rollup memory as context in every request
+- Stores assistant responses automatically
+
+**Important Requirements:**
+
+⚠️ **Critical:** The `messages` array **cannot be empty**. If you send an empty array `[]`, the backend will return an error: `"'messages' array cannot be empty."`
+
+**For new chats, you have two options:**
+1. **Use single-turn mode:** Send `{"question": "your question", "session_id": "chat_id", "deck_ids": [...]}` (recommended for first message)
+2. **Use messages format:** Send `{"messages": [{"role": "user", "content": "your question"}], "session_id": "chat_id", "deck_ids": [...]}` (must have at least 1 message)
+
+**Message Format:**
+
+Each message in the `messages` array must have:
+- `role`: Either `"user"` or `"assistant"`
+- `content`: The message text (string)
+
+**System messages are automatically filtered:** Any messages with `role: "system"` in the `messages` array are ignored and not stored in the session.
+
+**See the [Conversation Management: Detailed Behavior](#conversation-management-detailed-behavior) section below for complete scenario breakdowns.**
+
+#### cURL Examples
+
+**Single-turn (simple):**
 
 ```bash
 curl -X POST http://localhost:5000/rag/deck-chat \
@@ -289,57 +569,178 @@ curl -X POST http://localhost:5000/rag/deck-chat \
      }'
 ```
 
+**Multi-turn with conversation history:**
+
+```bash
+curl -X POST http://localhost:5000/rag/deck-chat \
+     -H "Content-Type: application/json" \
+     -d '{
+       "messages": [
+         {"role": "user", "content": "What are the main topics?"},
+         {"role": "assistant", "content": "The main topics are..."},
+         {"role": "user", "content": "Explain topic 1 in detail"}
+       ],
+       "deck_ids": ["pptx_deck_abc123"],
+       "session_id": "my_session_123"
+     }'
+```
+
 #### Postman Example
 
 1. **Method:** `POST`
 2. **URL:** `http://localhost:5000/rag/deck-chat`
 3. **Headers:**
    - `Content-Type: application/json`
-4. **Body (raw JSON):**
+4. **Body (raw JSON) - Simple format:**
    ```json
    {
      "question": "What are the main topics covered in these slides?",
      "deck_ids": ["pptx_deck_abc123"]
    }
    ```
+   
+   **Body (raw JSON) - Conversation format:**
+   ```json
+   {
+     "messages": [
+       {"role": "user", "content": "What are the main topics?"},
+       {"role": "assistant", "content": "The main topics are..."},
+       {"role": "user", "content": "Explain topic 1 in detail"}
+     ],
+     "deck_ids": ["pptx_deck_abc123"],
+     "session_id": "my_session_123"
+   }
+   ```
 
-**Response:**
+**Response Format:**
+
+This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: text/event-stream`. The response consists of:
+
+1. **Metadata event** (sent first):
+
+   ```
+   event: metadata
+   data: {"question":"What are the main topics covered in these slides?","deck_ids":["pptx_deck_abc123"],"used_queries":[...],"sources":[...]}
+   ```
+
+2. **Token events** (streamed as they arrive):
+
+   ```
+   data: Based on the slide deck
+   data: , the main topics covered
+   data:  include...
+   ```
+
+3. **Done event** (sent when complete):
+   ```
+   event: done
+   data: [DONE]
+   ```
+
+**Response Fields (in metadata event):**
+
+- `question`: The original question asked
+- `deck_ids`: Array of deck IDs used for filtering
+- `used_queries`: Array of queries used (original + expanded queries for semantic search)
+- `sources`: Array of retrieved contexts, each containing:
+  - `source`: The deck_id or document source
+  - `slide_number`: Slide number (for slide chunks)
+  - `start_slide`, `end_slide`: Slide range (for window chunks)
+  - `page`: Page number (for page chunks)
+  - `chunk_type`: "slide", "window", or "page"
+
+**Example Metadata Event Data:**
 
 ```json
 {
   "question": "What are the main topics covered in these slides?",
   "deck_ids": ["pptx_deck_abc123"],
-  "total_slides": 25,
-  "answer": "Based on the slide deck, the main topics covered include...",
+  "used_queries": [
+    "What are the main topics covered in these slides?",
+    "What topics are discussed in the presentation?",
+    "What are the key subjects in the slides?",
+    "What content is covered in the deck?"
+  ],
   "sources": [
     {
       "source": "pptx_deck_abc123",
       "slide_number": 1,
-      "slide_title": "Introduction to Op-Amps",
       "chunk_type": "slide"
     },
     {
       "source": "pptx_deck_abc123",
-      "slide_number": 2,
-      "slide_title": "Basic Configurations",
-      "chunk_type": "slide"
+      "start_slide": 2,
+      "end_slide": 5,
+      "chunk_type": "window"
     }
-    // ... all slides from the deck(s)
+    // ... top-k most relevant chunks from the specified deck(s)
   ]
 }
 ```
 
-**Response Fields:**
+**JavaScript Example (Handling SSE Stream with Conversation):**
 
-- `question`: The original question asked
-- `deck_ids`: Array of deck IDs used
-- `total_slides`: Total number of slides loaded and attached to context
-- `answer`: The generated answer based on all slides in the deck(s)
-- `sources`: Array of all slides from the deck(s), each containing:
-  - `source`: The deck_id
-  - `slide_number`: Slide number
-  - `slide_title`: Title of the slide
-  - `chunk_type`: Always "slide"
+```javascript
+// Initialize conversation
+let sessionId = `session_${Date.now()}`;
+let conversationHistory = [];
+
+async function askDeckQuestion(question, deckIds) {
+  // Add user message to history
+  conversationHistory.push({ role: "user", content: question });
+  
+  const response = await fetch("http://localhost:5000/rag/deck-chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: conversationHistory,
+      deck_ids: deckIds,
+      session_id: sessionId
+    }),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let metadata = null;
+  let answer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("event: metadata")) {
+        const nextLine = lines[++i];
+        if (nextLine && nextLine.startsWith("data: ")) {
+          metadata = JSON.parse(nextLine.substring(6));
+          console.log("Sources:", metadata.sources);
+        }
+      } else if (line.startsWith("data: ")) {
+        const data = line.substring(6);
+        if (data === "[DONE]") {
+          // Add assistant response to history
+          conversationHistory.push({ role: "assistant", content: answer });
+          console.log("Stream complete. Final answer:", answer);
+          break;
+        } else {
+          // Content is JSON-encoded to preserve newlines
+          const token = JSON.parse(data);
+          answer += token;
+          // Update UI with streaming answer
+        }
+      }
+    }
+  }
+}
+```
+
+**Note:** The answer tokens are streamed incrementally. Concatenate all `data:` events (except the `[DONE]` event) to reconstruct the full answer.
 
 **Error Responses:**
 
@@ -348,6 +749,14 @@ Missing question:
 ```json
 {
   "error": "'question' must be non-empty."
+}
+```
+
+Empty messages array:
+
+```json
+{
+  "error": "'messages' array cannot be empty."
 }
 ```
 
@@ -367,11 +776,11 @@ Invalid deck_ids format:
 }
 ```
 
-No slides found:
+No relevant content found:
 
 ```json
 {
-  "error": "No slides found for deck_ids: ['pptx_deck_abc123']"
+  "error": "No relevant content found for deck_ids: ['pptx_deck_abc123']"
 }
 ```
 
@@ -385,21 +794,23 @@ Groq API error:
 
 **Notes:**
 
-- **No RAG/Semantic Search**: This endpoint loads ALL slides from the specified deck(s) and attaches them to every prompt - no semantic search is performed
-- **Multiple Decks**: You can specify multiple deck_ids to combine slides from different decks
-- **Sequential Order**: Slides are sorted by deck_id and slide_number to maintain order
-- **Use Case**: Ideal for tutoring/Q&A sessions where you want to discuss a specific slide deck comprehensively
-- **Context Size**: Be mindful that large decks may hit token limits - consider splitting very large decks or using the regular `/rag/chat` endpoint for selective retrieval
+- **RAG with Deck Filtering**: This endpoint uses semantic search (RAG) but filters results to only include chunks from the specified deck_ids
+- **Multiple Decks**: You can specify multiple deck_ids to search across multiple decks simultaneously
+- **Query Expansion**: By default, uses query expansion to find relevant content with different wording
+- **Neighbor Expansion**: Automatically includes neighboring slides (±1) when a slide chunk is retrieved for better context
+- **Use Case**: Ideal for deck-specific tutoring/Q&A where you want focused answers from specific slide decks
+- **Efficient**: Only retrieves top-k most relevant chunks, avoiding token limit issues with large decks
 - **Get deck_ids**: Use the `/rag/ingest-slides` endpoint to upload decks and get their deck_ids
 
 **Comparison with /rag/chat:**
 
 | Feature   | /rag/chat                      | /rag/deck-chat                     |
 | --------- | ------------------------------ | ---------------------------------- |
-| Retrieval | Semantic search (RAG)          | All slides from deck(s)            |
-| Context   | Top-k relevant chunks          | All slides                         |
+| Retrieval | Semantic search (RAG)          | Semantic search (RAG) with deck filtering |
+| Context   | Top-k relevant chunks (all sources) | Top-k relevant chunks (filtered to deck_ids) |
 | Use Case  | Broad knowledge base queries   | Deck-specific tutoring             |
-| Sources   | Mixed (pages, slides, windows) | Only slides from specified deck(s) |
+| Sources   | Mixed (pages, slides, windows) | Only slides/windows from specified deck(s) |
+| Filtering | None (searches entire DB)       | Metadata filter by deck_id         |
 
 ---
 
@@ -544,7 +955,7 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 
 **Endpoint:** `POST /rag/generate-quiz`
 
-**Description:** Generates quiz questions from one or more slide decks. Retrieves ALL slides from specified deck(s), sends them to the LLM with custom instructions, and returns quiz questions in a database-ready format matching your `quiz_questions` table structure.
+**Description:** Generates quiz questions from one or more slide decks using RAG (Retrieval-Augmented Generation). Uses semantic search to retrieve comprehensive, relevant content from the specified deck(s), then sends the retrieved contexts to the LLM with custom instructions. Returns quiz questions in a database-ready format matching your `quiz_questions` table structure.
 
 **Request Body:**
 
@@ -627,7 +1038,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
 ```json
 {
   "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"],
-  "total_slides": 50,
+  "contexts_retrieved": 30,
   "question_count": 15,
   "question_type": "mixed",
   "question_counts": {
@@ -666,7 +1077,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
 **Response Fields:**
 
 - `deck_ids`: Array of deck IDs used for quiz generation
-- `total_slides`: Total number of slides retrieved from all decks
+- `contexts_retrieved`: Number of relevant contexts retrieved via RAG (slide/window chunks)
 - `question_count`: Number of questions generated
 - `question_type`: `"mixed"` when multiple types were requested, otherwise the single requested type
 - `question_counts`: Object showing the requested per-type counts
@@ -716,11 +1127,11 @@ Missing question_counts (400):
 }
 ```
 
-No slides found (404):
+No relevant content found (404):
 
 ```json
 {
-  "error": "No slides found for deck_ids: ['pptx_deck_abc123']"
+  "error": "No relevant content found for deck_ids: ['pptx_deck_abc123']"
 }
 ```
 
@@ -743,12 +1154,13 @@ Groq API error (500):
 
 **Notes:**
 
-- **Multiple Decks**: You can pass multiple `deck_ids` to combine slides from different decks into one quiz
-- **Direct Retrieval**: Unlike `/rag/chat`, this endpoint uses direct metadata filtering (not semantic search) to get ALL slides from the specified decks
+- **Multiple Decks**: You can pass multiple `deck_ids` to search across different decks simultaneously
+- **RAG-Based Retrieval**: Uses semantic search (RAG) with deck filtering to retrieve comprehensive, relevant content (top-30 contexts by default for broad coverage)
+- **Query Expansion**: Uses query expansion based on `quiz_description` to find relevant content with different wording
 - **Database-Ready Format**: The response is formatted to match your `quiz_questions` table structure - just add `module_id` and insert
-- **Custom Instructions**: Use `quiz_description` to guide the AI (e.g., focus on specific slides, emphasize certain topics)
+- **Custom Instructions**: Use `quiz_description` to guide both the RAG retrieval and the quiz generation (e.g., "Focus on op-amps and filters" will retrieve relevant slides and generate questions on those topics)
 - **Question Types**: Supports multiple choice (4 options), true/false (2 options), and short answer (no options)
-- The endpoint retrieves slides in order (sorted by deck_id, then slide_number) to maintain context
+- **Comprehensive Coverage**: Uses high top_k (30) to ensure broad coverage of topics for quiz generation
 
 **Example Workflow:**
 
@@ -762,17 +1174,66 @@ Groq API error (500):
 
 **Endpoint:** `POST /groq/general-llm`
 
-**Description:** Direct LLM query without RAG context. Uses general circuit design knowledge. Does not use ingested documents.
+**Description:** Direct LLM query without RAG context. Uses general circuit design knowledge. Does not use ingested documents. Returns a streaming response via Server-Sent Events (SSE).
 
-**Request Body:**
+**Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
+
+**Request Body (Simple Format - Single Turn):**
 
 ```json
 {
-  "prompt": "Explain how a transistor works" // Required
+  "prompt": "Explain how a transistor works" // Required (if messages not provided)
 }
 ```
 
-#### cURL Example
+**Request Body (Conversation Format - Multi-Turn):**
+
+```json
+{
+  "messages": [ // Required (if prompt not provided)
+    {"role": "user", "content": "Explain how a transistor works"},
+    {"role": "assistant", "content": "A transistor is a semiconductor device..."},
+    {"role": "user", "content": "What are the different types?"}
+  ],
+  "session_id": "session_123" // Optional: for conversation management
+}
+```
+
+**Parameters:**
+
+- `prompt` (required if `messages` not provided): The prompt/question to send (single-turn mode)
+- `messages` (required if `prompt` not provided): Array of conversation messages with `role` ("user" or "assistant") and `content` (string). Frontend should send full conversation history each time.
+- `session_id` (optional): Unique identifier for conversation session. Enables automatic conversation management with fixed window (30 messages) and rollup memory for older messages.
+
+**Conversation Management:**
+
+When `session_id` is provided, the backend automatically:
+- Keeps the last 30 messages (15 turns) as raw conversation history
+- Compresses older messages into rollup memory when the limit is exceeded
+- Includes rollup memory as context in every request
+- Stores assistant responses automatically
+
+**Important Requirements:**
+
+⚠️ **Critical:** The `messages` array **cannot be empty**. If you send an empty array `[]`, the backend will return an error: `"'messages' array cannot be empty."`
+
+**For new chats, you have two options:**
+1. **Use single-turn mode:** Send `{"prompt": "your prompt", "session_id": "chat_id"}` (recommended for first message)
+2. **Use messages format:** Send `{"messages": [{"role": "user", "content": "your prompt"}], "session_id": "chat_id"}` (must have at least 1 message)
+
+**Message Format:**
+
+Each message in the `messages` array must have:
+- `role`: Either `"user"` or `"assistant"`
+- `content`: The message text (string)
+
+**System messages are automatically filtered:** Any messages with `role: "system"` in the `messages` array are ignored and not stored in the session.
+
+**See the [Conversation Management: Detailed Behavior](#conversation-management-detailed-behavior) section below for complete scenario breakdowns.**
+
+#### cURL Examples
+
+**Single-turn (simple):**
 
 ```bash
 curl -X POST http://localhost:5000/groq/general-llm \
@@ -780,12 +1241,96 @@ curl -X POST http://localhost:5000/groq/general-llm \
   -d '{"prompt": "Explain how a transistor works"}'
 ```
 
-**Response:**
+**Multi-turn with conversation history:**
 
-```json
-{
-  "prompt": "Explain how a transistor works",
-  "answer": "A transistor is a semiconductor device that can amplify or switch electronic signals..."
+```bash
+curl -X POST http://localhost:5000/groq/general-llm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Explain how a transistor works"},
+      {"role": "assistant", "content": "A transistor is..."},
+      {"role": "user", "content": "What are the different types?"}
+    ],
+    "session_id": "my_session_123"
+  }'
+```
+
+**Response Format:**
+
+This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: text/event-stream`. The response consists of:
+
+1. **Token events** (streamed as they arrive):
+
+   ```
+   data: A transistor is a semiconductor
+   data:  device that can amplify
+   data:  or switch electronic signals...
+   ```
+
+2. **Done event** (sent when complete):
+   ```
+   event: done
+   data: [DONE]
+   ```
+
+**JavaScript Example (Handling SSE Stream with Conversation):**
+
+```javascript
+// Initialize conversation
+let sessionId = `session_${Date.now()}`;
+let conversationHistory = [];
+
+async function askQuestion(prompt) {
+  // Add user message to history
+  conversationHistory.push({ role: "user", content: prompt });
+  
+  const response = await fetch("http://localhost:5000/groq/general-llm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: conversationHistory,
+      session_id: sessionId
+    }),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("data: ")) {
+        const data = line.substring(6);
+        if (data === "[DONE]") {
+          // Add assistant response to history
+          conversationHistory.push({ role: "assistant", content: answer });
+          console.log("Stream complete. Final answer:", answer);
+          break;
+        } else {
+          // Content is JSON-encoded to preserve newlines
+          const token = JSON.parse(data);
+          answer += token;
+          // Update UI with streaming answer
+          document.getElementById("answer").textContent = answer;
+        }
+      } else if (line.startsWith("event: error")) {
+        const nextLine = lines[++i];
+        if (nextLine && nextLine.startsWith("data: ")) {
+          console.error("Error:", nextLine.substring(6));
+        }
+      }
+    }
+  }
 }
 ```
 
@@ -799,6 +1344,14 @@ Missing prompt (400):
 }
 ```
 
+Empty messages array (400):
+
+```json
+{
+  "error": "'messages' array cannot be empty."
+}
+```
+
 LLM not configured (500):
 
 ```json
@@ -807,7 +1360,234 @@ LLM not configured (500):
 }
 ```
 
-**Note:** This endpoint does not use the ingested documents and provides general knowledge responses based on the LLM's training data.
+**Note:** This endpoint does not use the ingested documents and provides general knowledge responses based on the LLM's training data. The response is streamed token-by-token for real-time display.
+
+---
+
+## Conversation Management: Detailed Behavior
+
+All three chat endpoints (`/rag/chat`, `/rag/deck-chat`, `/groq/general-llm`) support the same conversation management pattern. This section explains the exact backend behavior in different scenarios.
+
+### How It Works
+
+**Fixed Window + Rollup Strategy:**
+- **Raw Messages Window:** The backend keeps the last **30 messages** (15 turns) in raw format
+- **Rollup Memory:** Messages older than 30 are compressed into a single rollup memory string
+- **Automatic Management:** When the limit is exceeded, the oldest messages are automatically rolled up
+
+**Message Flow:**
+1. Frontend sends full conversation history in `messages` array (stateless pattern)
+2. Backend syncs session with the provided messages
+3. If messages > 30: oldest messages are rolled up, last 30 kept as raw
+4. LLM receives: `[system_prompt, rollup_memory (if exists), last_30_messages]`
+5. Assistant response is automatically stored in session
+
+### Scenario Breakdown
+
+#### Scenario 1: New Chat (First Message)
+
+**Frontend sends:**
+```json
+{
+  "question": "What is an op-amp?",
+  "session_id": "chat_123"
+}
+```
+OR
+```json
+{
+  "messages": [{"role": "user", "content": "What is an op-amp?"}],
+  "session_id": "chat_123"
+}
+```
+
+**Backend behavior:**
+- Creates new session: `session.messages = []`, `rollup_memory = None`
+- Stores user message: `session.messages = [user_msg]`
+- No rollup needed (1 message < 30)
+- LLM receives: `[system_prompt, user_message]`
+- After response: `session.messages = [user_msg, assistant_msg]` (2 messages)
+
+**⚠️ Error if you send:** `{"messages": [], "session_id": "chat_123"}` → Returns error: `"'messages' array cannot be empty."`
+
+---
+
+#### Scenario 2: Old Chat - 13th Message
+
+**Frontend sends:**
+```json
+{
+  "messages": [
+    // 12 previous messages (6 turns)
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."},
+    // ... 10 more messages
+    {"role": "user", "content": "New question"}  // 13th message
+  ],
+  "session_id": "chat_123"
+}
+```
+
+**Backend behavior:**
+- Retrieves existing session (may have previous messages + rollup)
+- Filters system messages: 13 conversation messages
+- Checks: `13 > 30?` → **No**, no rollup needed
+- Syncs session: `session.messages = [all 13 messages]`
+- LLM receives: `[system_prompt, rollup_memory (if exists), 13_messages]`
+- After response: `session.messages = [14 messages]` (7 turns)
+
+---
+
+#### Scenario 3: Old Chat - 32nd Message
+
+**Frontend sends:**
+```json
+{
+  "messages": [
+    // 30 previous messages (15 turns)
+    // ... 30 messages ...
+    {"role": "user", "content": "New question"}  // 31st message
+  ],
+  "session_id": "chat_123"
+}
+```
+
+**Backend behavior:**
+- Retrieves existing session
+- Filters system messages: 31 conversation messages
+- Checks: `31 > 30?` → **Yes**, rollup triggered
+- Calculates overflow: `overflow_count = 31 - 30 = 1`
+- Rollup process:
+  - Takes first 1 message: `messages_to_rollup = [oldest_message]`
+  - Generates rollup: `new_rollup = rollup_generator(existing_rollup + 1_message)`
+  - Updates: `session.rollup_memory = new_rollup`
+- Keeps last 30: `session.messages = messages[1:31]` (last 30 messages)
+- LLM receives: `[system_prompt, rollup_memory, last_30_messages]`
+- After response: `session.messages = [31 messages]` → Next message will trigger rollup again
+
+**Note:** Only the overflow messages (31 - 30 = 1 in this case) are rolled up. The rollup includes both the existing rollup memory (if any) and the new overflow messages.
+
+---
+
+#### Scenario 4: After Browser Restart / Server Restart
+
+**Frontend sends:**
+```json
+{
+  "messages": [
+    // 10 messages loaded from database
+    // ... 10 messages ...
+    {"role": "user", "content": "New question"}  // 11th message
+  ],
+  "session_id": "chat_123"  // Same chat ID
+}
+```
+
+**Backend behavior:**
+
+**Case A: Server Still Running (Session in Memory)**
+- Finds existing session in memory
+- May have rollup memory from previous conversation
+- Processes all 11 messages as in Scenario 2
+- Works seamlessly
+
+**Case B: Server Restarted (Session Lost)**
+- Session not found → Creates new session: `session.messages = []`, `rollup_memory = None`
+- Since frontend sends full history, session syncs: `session.messages = [all 11 messages]`
+- No rollup needed (11 < 30)
+- LLM receives: `[system_prompt, 11_messages]` (no rollup since it was lost)
+- **Important:** Rollup memory is lost on server restart, but frontend's full history restores context
+
+**Key Point:** The frontend sending full conversation history each time ensures the backend always has complete context, even if the server restarts and loses session state.
+
+---
+
+### Rollup Memory Details
+
+**When Rollup Happens:**
+- Triggered when `len(conversation_messages) > 30`
+- Only the overflow messages are rolled up: `overflow_count = total_messages - 30`
+- Example: 35 messages → first 5 messages rolled up, last 30 kept raw
+
+**Rollup Generation:**
+- Takes existing `rollup_memory` (if any) + overflow messages
+- Sends to LLM with rollup prompt to generate compressed memory
+- New rollup replaces old rollup (accumulates context)
+- Format: Structured memory block with Summary, Decisions, Constraints, Open Loops, References
+
+**Rollup in LLM Context:**
+- Rollup memory is included as a synthetic user message: `[Previous conversation context]\n{rollup_memory}`
+- Appears before the raw messages in the LLM prompt
+- Allows LLM to maintain context from older conversations
+
+---
+
+### Session Persistence
+
+**Current Implementation:**
+- **In-Memory Only:** Sessions are stored in server memory
+- **Lost on Restart:** If the server restarts, all sessions are lost
+- **Recovery:** Frontend sending full history allows session recovery, but rollup memory is regenerated
+
+**Best Practices:**
+1. **Frontend should always send full conversation history** from database
+2. **Use consistent `session_id`** (e.g., database chat ID)
+3. **Don't rely on backend session persistence** - treat backend as stateless
+4. **Store conversation history in your database** - backend session is for optimization only
+
+---
+
+### Frontend Integration Guide
+
+**Recommended Pattern:**
+
+```javascript
+// 1. New Chat
+const newChat = {
+  question: "First question",  // Use question field for first message
+  session_id: chatId
+};
+
+// 2. Subsequent Messages
+const existingChat = {
+  messages: [
+    ...conversationHistoryFromDB,  // Load from your database
+    { role: "user", content: "New question" }  // Add current message
+  ],
+  session_id: chatId  // Same chat ID from database
+};
+
+// 3. After Browser Restart
+// Load conversationHistory from database, then send as above
+const restoredChat = {
+  messages: conversationHistoryFromDB,  // Full history from DB
+  session_id: chatId  // Same chat ID
+};
+```
+
+**Error Handling:**
+- If you send empty `messages: []`, backend returns 400 error
+- Always include at least 1 message, or use `question` field for first message
+- System messages (`role: "system"`) are automatically filtered
+
+---
+
+### Summary Table
+
+| Scenario | Messages Sent | Backend Action | Rollup? | LLM Context |
+|----------|--------------|----------------|---------|-------------|
+| New Chat | `question` or `[1 msg]` | Create session, store 1 msg | No | System + 1 msg |
+| 13th Message | `[13 msgs]` | Sync session, store all 13 | No | System + (rollup?) + 13 msgs |
+| 32nd Message | `[31 msgs]` | Rollup 1, keep 30 | Yes | System + rollup + 30 msgs |
+| After Restart (server running) | `[N msgs]` | Use existing session | Depends | System + rollup + last 30 |
+| After Restart (server restarted) | `[N msgs]` | Create new session | Depends | System + (new rollup?) + last 30 |
+
+**Key Takeaways:**
+- Backend maintains last 30 messages in raw format
+- Older messages compressed into rollup memory
+- Frontend should send full history each time (stateless pattern)
+- Session persistence is for optimization, not reliability
+- Empty messages array will error - use `question` field or at least 1 message
 
 ---
 
@@ -895,15 +1675,20 @@ FROM json_populate_recordset(NULL::quiz_questions, '[...questions JSON...]');
 
 ---
 
-## Query Expansion
+## RAG Enhancements & Features
 
-When `use_query_expansion` is enabled (default: `true`) in `/rag/chat`, the system:
+### Query Expansion (Enhancement 1: Context-Aware Query Expansion)
+
+When `use_query_expansion` is enabled (default: `true`) in `/rag/chat` and `/rag/deck-chat`, the system:
 
 1. Takes your original question
-2. Uses Groq API to generate alternative phrasings (e.g., "operational amplifier fundamentals", "op‑amp input and output characteristics")
-3. Searches ChromaDB with all queries (original + expansions)
-4. Combines and deduplicates results
-5. Uses the best context chunks to generate the answer
+2. Uses conversation history (if available) to generate context-aware alternative phrasings
+3. Uses Groq API to generate alternative phrasings (e.g., "operational amplifier fundamentals", "op‑amp input and output characteristics")
+4. Searches ChromaDB with all queries (original + expansions)
+5. Combines and deduplicates results
+6. Uses the best context chunks to generate the answer
+
+**Enhancement:** Query expansion now uses conversation history to generate more relevant expansions. For example, if you previously asked about "op amps", a follow-up question "Which is better?" will expand using op amp context.
 
 This improves recall, especially for domain-specific terminology or when questions are phrased differently than the source material.
 
@@ -916,11 +1701,197 @@ This improves recall, especially for domain-specific terminology or when questio
 }
 ```
 
+### Query Reformulation (Enhancement 2: Conversation-Aware Query Reformulation)
+
+The system automatically reformulates contextual questions using conversation history:
+
+**Examples:**
+- `"What was my previous question?"` → Reformulated to the actual previous question
+- `"Which is better?"` → Reformulated using what was being compared in the conversation
+- `"Repeat that"` → Reformulated to the original question being asked
+
+This works automatically - just include conversation history via `messages` array and `session_id`.
+
+### Coding Question Decomposition (Enhancement 3)
+
+For coding questions, the system automatically decomposes them into learning-focused sub-queries:
+
+**Example:**
+```
+Input: "Write I2C code for PIC18 temperature sensor"
+
+Expanded into:
+1. What assembly language does PIC18 use?
+2. How to create variables in PIC18?
+3. How to create 32-bit variables in PIC18?
+4. I2C hardware in PIC18 example
+5. I2C software in PIC18 example
+6. Temperature sensor I2C protocol for PIC18
+```
+
+The system then retrieves information for each sub-query and combines results for a comprehensive answer.
+
+**Automatic:** Works automatically for coding questions (detected by keywords like "write", "code", "implement", "syntax", etc.)
+
+### Question Type Detection & Routing (Enhancement 4)
+
+The system automatically detects question types and applies appropriate retrieval strategies:
+
+- **Direct Questions**: Normal semantic search
+- **Follow-up Questions**: Reformulated using conversation history
+- **Slide-Specific**: Direct metadata lookup (see below)
+- **Coding Questions**: Decomposed into sub-queries
+- **Comparative Questions**: Reformulated with context, higher `top_k` for better coverage
+
+**Automatic:** No configuration needed - works automatically based on question content.
+
+### Slide-Specific Retrieval (Enhancement 4: Part of Question Type Detection)
+
+For slide queries, the system uses direct metadata lookup instead of semantic search:
+
+**Supported Formats:**
+- Single slides: `"slide 17"`, `"#17"`, `"slide number 17"`
+- Ranges: `"slides 1-10"`, `"slides 1 to 10"`, `"slides 1 through 10"`
+
+**Examples:**
+```json
+{
+  "question": "Explain slide 17",
+  "deck_ids": ["deck_abc123"]
+}
+```
+→ Directly retrieves slide 17 (not semantic search)
+
+```json
+{
+  "question": "What's on slides 1 to 10?",
+  "deck_ids": ["deck_abc123"]
+}
+```
+→ Directly retrieves slides 1 through 10
+
+**Benefits:**
+- Precise results (no wrong slides returned)
+- Faster retrieval (direct lookup vs semantic search)
+- Works in both `/rag/chat` and `/rag/deck-chat`
+
+### Context-Aware Answer Generation (Enhancement 6)
+
+The system uses conversation history to generate better answers:
+
+- **Follow-up Continuity**: References previous answers when relevant
+- **Context Understanding**: Understands context of current question from conversation history
+- **Answer Coherence**: Maintains conversation flow and continuity
+
+**Automatic:** Works automatically when `messages` array or `session_id` is provided.
+
 ---
+
+## Server-Sent Events (SSE) Streaming
+
+The following endpoints use SSE streaming for real-time token delivery:
+
+- `/rag/chat` - RAG-powered Q&A
+- `/rag/deck-chat` - Deck-based chat
+- `/groq/general-llm` - General LLM queries
+
+### SSE Event Types
+
+1. **`event: metadata`** - Contains metadata about the request (sources, used_queries, etc.). Sent first, before token streaming begins.
+2. **`data: <token>`** - Individual tokens of the answer, streamed as they are generated.
+3. **`event: done`** - Signals that streaming is complete. The data field contains `[DONE]`.
+4. **`event: error`** - Signals an error occurred during streaming. The data field contains the error message.
+
+**Important Note on Newlines:**
+
+The system ensures proper newline handling through multiple layers:
+
+1. **System Prompt Instructions**: All LLM system prompts explicitly instruct the model to use actual newline characters (`\n`) for line breaks and paragraph separation, and to avoid special unicode spaces like em-space (`\u2003`).
+
+2. **Post-Processing Safety Net**: As a safety measure, the backend automatically converts any em-space characters (`\u2003`) to newlines (`\n`) before streaming. This ensures proper markdown rendering even if the LLM occasionally outputs em-spaces.
+
+3. **JSON Encoding for Transport**: Content is JSON-encoded before sending (e.g., `"Hello\nWorld"` becomes `"\"Hello\\nWorld\""`), which ensures newlines survive SSE transport. The frontend must `JSON.parse()` each `data:` event to decode the content and restore the original newlines.
+
+4. **SSE Protocol Delimiters**: The `\n\n` at the end of each SSE line is the SSE protocol delimiter (required by the specification), not part of the content.
+
+**Result**: Markdown formatting with proper line breaks and paragraph separation is preserved throughout the entire pipeline, from LLM generation to frontend display.
+
+### Handling SSE Streams
+
+**In JavaScript (using EventSource-like approach):**
+
+```javascript
+const response = await fetch("http://localhost:5000/rag/chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ question: "Your question" }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split("\n");
+  buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("event: ")) {
+      const eventType = line.substring(7);
+      const nextLine = lines[++i];
+      if (nextLine && nextLine.startsWith("data: ")) {
+        const data = nextLine.substring(6);
+        handleEvent(eventType, data);
+      }
+    } else if (line.startsWith("data: ")) {
+      const data = line.substring(6);
+      if (data !== "[DONE]") {
+        // Content is JSON-encoded to preserve newlines
+        const token = JSON.parse(data);
+        handleToken(token);
+      }
+    }
+  }
+}
+```
+
+**In Python (using requests):**
+
+```python
+import requests
+import json
+
+response = requests.post(
+    'http://localhost:5000/rag/chat',
+    json={'question': 'Your question'},
+    stream=True
+)
+
+for line in response.iter_lines():
+    if line:
+        line = line.decode('utf-8')
+        if line.startswith('event: '):
+            event_type = line[7:]
+        elif line.startswith('data: '):
+            data = line[6:]
+            if event_type == 'metadata':
+                metadata = json.loads(data)
+            elif data == '[DONE]':
+                break
+            else:
+                # Token data - JSON-encoded to preserve newlines
+                token = json.loads(data)
+                print(token, end='', flush=True)
+```
 
 ## Citation Format
 
-Answers from `/rag/chat` include inline citations in the format `[1]`, `[2]`, etc. These correspond to the sources in the `sources` array, where:
+Answers from `/rag/chat` include inline citations in the format `[1]`, `[2]`, etc. These correspond to the sources in the `sources` array from the metadata event, where:
 
 - `[1]` = first source in the array
 - `[2]` = second source in the array
@@ -938,10 +1909,16 @@ Each source includes:
 
 - **Ingestion (PDFs):** Processing time depends on PDF size and number of files. Large PDFs (e.g., 464 pages) may take several minutes.
 - **Ingestion (Slides):** Processing time depends on number of slides and OCR requirements. Typical deck (15-50 slides) takes 10-30 seconds.
-- **Query Response (`/rag/chat`):** Typically under 10 seconds (meets FR-15.2 requirement). Response time depends on:
-  - Query expansion (adds ~1-2 seconds if enabled)
+- **Query Response (`/rag/chat`):** Uses SSE streaming for real-time token delivery. First token typically arrives within 2-5 seconds. Total response time depends on:
+  - **Query expansion** (adds ~1-2 seconds if enabled) - Now context-aware, uses conversation history
+  - **Query reformulation** (adds ~0.5-1 second for contextual questions) - Automatic for follow-up questions
+  - **Coding question decomposition** (adds ~1-2 seconds) - Automatic for coding questions, generates multiple sub-queries
+  - **Slide-specific queries** - Faster than semantic search (direct metadata lookup)
   - Number of chunks retrieved
   - Groq API response time
+  - Answer length (longer answers stream over more time)
+- **Deck Chat (`/rag/deck-chat`):** Uses SSE streaming. First token typically arrives within 3-7 seconds depending on deck size. Same enhancements as `/rag/chat`.
+- **General LLM (`/groq/general-llm`):** Uses SSE streaming. First token typically arrives within 1-3 seconds.
 - **Quiz Generation (`/rag/generate-quiz`):** Processing time depends on:
   - Number of slides (more slides = longer LLM prompt)
   - Number of questions requested
@@ -967,7 +1944,7 @@ Each source includes:
 
 ### Quiz Generation Errors
 
-- **"No slides found for deck_ids"**: Verify the `deck_id` exists. Re-ingest the slide deck if needed.
+- **"No relevant content found for deck_ids"**: Verify the `deck_id` exists and contains slides. Re-ingest the slide deck if needed. The query may also be too specific - try a broader query.
 - **"Failed to parse quiz JSON"**: The LLM may have returned invalid JSON. Check the `raw_response` field in the error. This is usually rare but can happen with very large prompts.
 - **Slow response**: For large decks (100+ slides), consider using `quiz_description` to limit focus to specific slides
 
@@ -1018,15 +1995,16 @@ All example responses in this document were taken directly from actual test runs
 
 ## Summary of Endpoints
 
-| Endpoint             | Method | Purpose                      | Input                                             | Output                    |
-| -------------------- | ------ | ---------------------------- | ------------------------------------------------- | ------------------------- |
-| `/health`            | GET    | Health check                 | None                                              | "OK"                      |
-| `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary         |
-| `/rag/chat`          | POST   | RAG-powered Q&A              | `question`, `top_k`, `use_query_expansion`        | Answer + sources          |
-| `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats         |
-| `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready) |
-| `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`      |
-| `/groq/general-llm`  | POST   | Direct LLM query (no RAG)    | `prompt`                                          | LLM response              |
+| Endpoint             | Method | Purpose                      | Input                                             | Output                     | Response Type |
+| -------------------- | ------ | ---------------------------- | ------------------------------------------------- | -------------------------- | ------------- |
+| `/health`            | GET    | Health check                 | None                                              | "OK"                       | Plain text    |
+| `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary          | JSON          |
+| `/rag/chat`          | POST   | RAG-powered Q&A (with intelligent enhancements) | `question`, `messages`, `session_id`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
+| `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered, with intelligent enhancements) | `question`, `messages`, `session_id`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
+| `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats          | JSON          |
+| `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready)  | JSON          |
+| `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`       | JSON          |
+| `/groq/general-llm`  | POST   | Direct LLM query (no RAG)    | `prompt`                                          | Streaming LLM response     | SSE stream    |
 
 ---
 
