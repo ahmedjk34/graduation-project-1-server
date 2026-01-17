@@ -3,7 +3,15 @@ from flask import Blueprint, request, jsonify, Response
 import json
 
 from rag.ingest import ingest_directory
-from rag.retrieval import retrieve_context, generate_answer, get_all_slides_from_decks, groq_client, build_slides_context, reformulate_query_with_context
+from rag.retrieval import (
+    retrieve_context, 
+    generate_answer, 
+    groq_client, 
+    reformulate_query_with_context,
+    detect_question_type,
+    retrieve_context_by_type,
+    QuestionType
+)
 from rag.slide_ingest import ingest_pdf_deck, ingest_pptx_deck
 from rag.ocr_adapter import get_ocr_adapter
 from rag.prompts import QUIZ_GENERATION_SYSTEM_PROMPT, build_quiz_generation_prompt, DECK_CHAT_SYSTEM_PROMPT
@@ -106,12 +114,17 @@ def rag_chat():
         rollup_memory=rollup_memory
     )
 
-    # 4. Retrieve relevant context chunks
+    # 3.7. Detect question type and route to appropriate retrieval (Enhancement 4)
+    question_type = detect_question_type(reformulated_question, conversation_history)
+
+    # 4. Retrieve relevant context chunks using type-specific strategy
     try:
-        ctx, used_queries = retrieve_context(
-            reformulated_question,  # Use reformulated question for retrieval
+        ctx, used_queries = retrieve_context_by_type(
+            reformulated_question,
+            question_type=question_type,
             top_k=top_k,
             use_query_expansion=expand,
+            deck_ids=None,
             conversation_history=conversation_history,
             rollup_memory=rollup_memory
         )
@@ -232,10 +245,14 @@ def deck_chat():
         rollup_memory=rollup_memory
     )
 
+    # 3.7. Detect question type and route to appropriate retrieval (Enhancement 4)
+    question_type = detect_question_type(reformulated_question, conversation_history)
+
     # 4. Retrieve relevant context using RAG (filtered to specified deck_ids)
     try:
-        ctx, used_queries = retrieve_context(
-            reformulated_question,  # Use reformulated question for retrieval
+        ctx, used_queries = retrieve_context_by_type(
+            reformulated_question,
+            question_type=question_type,
             top_k=top_k,
             use_query_expansion=expand,
             deck_ids=deck_ids,  # Filter to only search within specified decks

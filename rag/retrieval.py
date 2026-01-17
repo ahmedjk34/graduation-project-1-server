@@ -46,15 +46,22 @@
 from typing import List, Dict, Any, Tuple, Optional
 import logging
 import json
+import re
 import chromadb
 from flask import Response
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 from config import (
     CHROMA_PATH, COLLECTION_NAME, EMBED_MODEL_NAME,
     GROQ_API_KEY, GROQ_MODEL
 )
-from .prompts import CIRCUIT_TUTOR_SYSTEM_PROMPT, QUERY_EXPANSION_SYSTEM_PROMPT, QUERY_REFORMULATION_SYSTEM_PROMPT
+from .prompts import (
+    CIRCUIT_TUTOR_SYSTEM_PROMPT, 
+    QUERY_EXPANSION_SYSTEM_PROMPT, 
+    QUERY_REFORMULATION_SYSTEM_PROMPT,
+    CODING_QUERY_EXPANSION_SYSTEM_PROMPT
+)
 from .embeddings import LocalEmbeddingFunction
 from utils.llm_utils import create_groq_client
 from utils.conversation_storage import get_storage
@@ -209,6 +216,281 @@ Return ONLY the reformulated question, nothing else (no explanations, no quotes,
         return question
 
 
+# Detects if a query is asking for code or programming help
+def is_coding_question(query: str) -> bool:
+    # 1. Define coding/programming indicators
+    coding_indicators = [
+        "write", "code", "program", "implement", "function", "example",
+        "syntax", "how to", "api", "library", "driver", "interface",
+        "create", "build", "develop", "make", "generate", "template",
+        "initialize", "configure", "setup", "register", "interrupt",
+        "subroutine", "routine", "procedure", "macro", "assembly"
+    ]
+    
+    # 2. Check if query contains coding indicators
+    query_lower = query.lower()
+    return any(indicator in query_lower for indicator in coding_indicators)
+
+
+# Expands coding questions into learning-focused sub-queries
+# Thinks like a programmer learning a new language/platform
+def expand_coding_query(query: str) -> List[str]:
+    # 1. Check if this is a coding question
+    if not is_coding_question(query):
+        return [query]
+    
+    # 2. Validate Groq client is available
+    if groq_client is None:
+        logger.warning("Groq client not available, skipping coding query expansion")
+        return [query]
+    
+    # 3. Build expansion prompt
+    expansion_prompt = f"""The user is asking: "{query}"
+
+Think like a programmer learning a new language/platform/hardware who needs to write this code.
+Break down the question into sub-questions they would need to answer, in order of learning progression.
+
+Think hierarchically:
+- Language/Platform basics (What language? What assembly? What architecture?)
+- Syntax and structures (How to declare variables? How to define functions?)
+- Data types and memory (What types exist? How to handle specific data sizes?)
+- Hardware/API specifics (What hardware exists? What registers? What interfaces?)
+- Protocol/Interface details (How does the protocol work? What are the specifics?)
+- Implementation patterns (Common examples? Best practices? Code snippets?)
+- Integration details (How to combine components? How to wire everything together?)
+
+Be specific, technical, and practical. Think like someone writing code who doesn't know the platform yet.
+
+Example:
+User: "Write me an I2C code temp sensor in PIC18"
+Expansion:
+1. What assembly language does PIC18 use?
+2. How to create variables in PIC18?
+3. How to create 32-bit variables in PIC18?
+4. I2C hardware in PIC18 example
+5. I2C software in PIC18 example
+6. Temperature sensor I2C protocol for PIC18
+
+Generate 5-8 specific sub-questions, one per line, numbered:"""
+    
+    # 4. Call Groq to generate sub-queries
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": CODING_QUERY_EXPANSION_SYSTEM_PROMPT},
+                {"role": "user", "content": expansion_prompt},
+            ],
+            temperature=0.3,
+        )
+        
+        # 5. Parse numbered list from response
+        text = resp.choices[0].message.content.strip()
+        sub_queries = []
+        
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Remove numbering (1. 2. etc.) or bullet points (-)
+            query_text = re.sub(r'^\d+[\.\)]\s*', '', line)  # Remove "1. " or "1) "
+            query_text = re.sub(r'^-\s+', '', query_text)  # Remove "- "
+            query_text = query_text.strip()
+            
+            # Skip empty lines or lines that look like explanations
+            if query_text and len(query_text) > 5:  # Minimum length to be meaningful
+                sub_queries.append(query_text)
+        
+        # 6. Return sub-queries or fallback to original
+        if sub_queries:
+            return sub_queries[:8]  # Limit to 8 sub-queries
+        else:
+            logger.warning("No sub-queries extracted from coding query expansion")
+            return [query]
+        
+    except Exception as e:
+        logger.warning(f"Coding query expansion failed: {e}, using original query")
+        return [query]
+
+
+# Question type enumeration for routing retrieval strategies
+class QuestionType(Enum):
+    DIRECT = "direct"
+    FOLLOW_UP = "follow_up"
+    SLIDE_SPECIFIC = "slide_specific"
+    CODING = "coding"
+    COMPARATIVE = "comparative"
+    REFERENCE = "reference"
+
+
+# Detects the type of question to apply appropriate retrieval strategy
+def detect_question_type(
+    question: str,
+    conversation_history: Optional[List[Dict]] = None
+) -> QuestionType:
+    question_lower = question.lower().strip()
+    
+    # 1. Check for slide-specific patterns (handles both single and ranges)
+    slide_patterns = [
+        r'slide\s+(\d+)',  # "slide 17"
+        r'slides?\s+(\d+)\s+(?:to|through|-)\s+(\d+)',  # "slides 1 to 10" or "1-10"
+        r'#(\d+)',  # "#17"
+        r'slide\s+number\s+(\d+)',  # "slide number 17"
+        r'slides?\s+(\d+)\s*-\s*(\d+)',  # "slides 1-10" with space around dash
+    ]
+    
+    for pattern in slide_patterns:
+        if re.search(pattern, question_lower):
+            return QuestionType.SLIDE_SPECIFIC
+    
+    # 2. Check for coding questions
+    if is_coding_question(question):
+        return QuestionType.CODING
+    
+    # 3. Check for follow-up/reference questions
+    follow_up_phrases = [
+        "previous", "first", "earlier", "before", "repeat",
+        "what was", "what were", "what did i ask", "what did i say"
+    ]
+    if any(phrase in question_lower for phrase in follow_up_phrases):
+        return QuestionType.FOLLOW_UP
+    
+    # 4. Check for comparative questions
+    comparative_phrases = [
+        "which is better", "compare", "versus", "vs", "vs.",
+        "difference between", "differences between"
+    ]
+    if any(phrase in question_lower for phrase in comparative_phrases):
+        return QuestionType.COMPARATIVE
+    
+    # 5. Default to direct question
+    return QuestionType.DIRECT
+
+
+# Handles slide-specific queries (single slide or range)
+def retrieve_slide_specific(
+    question: str,
+    deck_ids: Optional[List[str]] = None,
+    neighbor_range: int = 1,
+    **kwargs
+) -> Tuple[List[Dict], List[str]]:
+    query_lower = question.lower()
+    
+    # 1. Parse slide number(s) - handle "slide 17", "slides 1-10", "slides 1 to 10"
+    range_match = re.search(r'slides?\s+(\d+)\s*(?:to|through|-)\s*(\d+)', query_lower)
+    if range_match:
+        slide_numbers = list(range(int(range_match.group(1)), int(range_match.group(2)) + 1))
+    else:
+        single_match = re.search(r'(?:slide\s+number\s+|slide\s+|#)(\d+)', query_lower)
+        if single_match:
+            slide_numbers = [int(single_match.group(1))]
+        else:
+            return retrieve_context(question, deck_ids=deck_ids, **kwargs)
+    
+    # 2. Retrieve slides
+    where_clause = {"$and": [{"chunk_type": "slide"}, {"slide_number": {"$in": slide_numbers}}]}
+    if deck_ids:
+        where_clause["$and"].append({"deck_id": {"$in": deck_ids}})
+    
+    try:
+        results = collection.get(where=where_clause, include=["documents", "metadatas"])
+    except Exception as e:
+        logger.warning(f"Failed to retrieve slides: {e}")
+        return retrieve_context(question, deck_ids=deck_ids, **kwargs)
+    
+    # 3. Convert to context format
+    contexts = []
+    slide_hits = []
+    for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
+        contexts.append({
+            "text": doc,
+            "source": meta.get("source"),
+            "deck_id": meta.get("deck_id"),
+            "slide_number": meta.get("slide_number"),
+            "chunk_type": "slide"
+        })
+        slide_hits.append(meta)
+    
+    # 4. Add neighbors if single slide and enabled
+    if neighbor_range > 0 and len(slide_numbers) == 1 and slide_hits:
+        contexts.extend(expand_slide_neighbors(slide_hits, neighbor_range))
+    
+    # 5. Sort by slide number
+    contexts.sort(key=lambda x: (x.get("deck_id", ""), x.get("slide_number", 0)))
+    
+    return contexts, [question]
+
+
+# Routes to appropriate retrieval strategy based on question type
+def retrieve_context_by_type(
+    question: str,
+    question_type: QuestionType,
+    conversation_history: Optional[List[Dict]] = None,
+    rollup_memory: Optional[str] = None,
+    **kwargs
+) -> Tuple[List[Dict], List[str]]:
+    # 1. Route based on question type
+    if question_type == QuestionType.SLIDE_SPECIFIC:
+        return retrieve_slide_specific(question, **kwargs)
+    
+    elif question_type == QuestionType.CODING:
+        # Use expanded queries for coding questions
+        expanded_queries = expand_coding_query(question)
+        queries = [question] + expanded_queries
+        
+        # Retrieve with expanded queries and higher top_k
+        effective_top_k = kwargs.get('top_k', 5) * 2
+        
+        # Use expanded queries in semantic search
+        all_contexts = []
+        all_queries = []
+        for query in queries:
+            ctx, qs = retrieve_context(
+                query,
+                top_k=effective_top_k,
+                use_query_expansion=False,  # Already expanded manually
+                **{k: v for k, v in kwargs.items() if k != 'top_k'}
+            )
+            all_contexts.extend(ctx)
+            all_queries.extend(qs)
+        
+        # Deduplicate contexts
+        seen = set()
+        unique_contexts = []
+        for ctx in all_contexts:
+            chunk_type = ctx.get("chunk_type")
+            if chunk_type == "slide":
+                key = (ctx.get("source"), ctx.get("deck_id"), ctx.get("slide_number"), chunk_type, ctx.get("text"))
+            elif chunk_type == "window":
+                key = (ctx.get("source"), ctx.get("deck_id"), ctx.get("start_slide"), ctx.get("end_slide"), chunk_type, ctx.get("text"))
+            else:
+                key = (ctx.get("source"), ctx.get("page"), chunk_type, ctx.get("text"))
+            
+            if key not in seen:
+                seen.add(key)
+                unique_contexts.append(ctx)
+        
+        return unique_contexts[:effective_top_k * 2], list(set(all_queries))
+    
+    elif question_type == QuestionType.FOLLOW_UP:
+        reformulated = reformulate_query_with_context(
+            question, conversation_history, rollup_memory
+        )
+        return retrieve_context(reformulated, **kwargs)
+    
+    elif question_type == QuestionType.COMPARATIVE:
+        reformulated = reformulate_query_with_context(
+            question, conversation_history, rollup_memory
+        )
+        # Use higher top_k for comparative questions
+        effective_top_k = kwargs.get('top_k', 5) * 2
+        return retrieve_context(reformulated, top_k=effective_top_k, **{k: v for k, v in kwargs.items() if k != 'top_k'})
+    
+    else:  # DIRECT
+        return retrieve_context(question, **kwargs)
+
+
 # Retrieves relevant chunks from ChromaDB
 # Supports query expansion and neighbor expansion for slides
 # If deck_ids is provided, filters results to only include chunks from those decks
@@ -223,18 +505,25 @@ def retrieve_context(
     conversation_history: Optional[List[Dict]] = None,
     rollup_memory: Optional[str] = None
 ) -> Tuple[List[Dict], List[str]]:
-    # 1. Build query list (original + expansions)
-    queries = [question]
-    if use_query_expansion:
-        expanded = expand_query_via_groq(
-            question, 
-            n=4,
-            conversation_history=conversation_history,
-            rollup_memory=rollup_memory
-        )
-        queries.extend(expanded)
-    
-    # 2. Build where clause if deck_ids provided (for deck-specific RAG)
+    # 1. Check if coding question and expand accordingly (Enhancement 3)
+    if is_coding_question(question):
+        expanded_queries = expand_coding_query(question)
+        queries = [question] + expanded_queries
+        # Use higher top_k for coding questions to get comprehensive results
+        top_k = top_k * 2
+    else:
+        # 2. Build query list (original + expansions) for semantic search
+        queries = [question]
+        if use_query_expansion:
+            expanded = expand_query_via_groq(
+                question, 
+                n=4,
+                conversation_history=conversation_history,
+                rollup_memory=rollup_memory
+            )
+            queries.extend(expanded)
+
+    # 3. Build where clause if deck_ids provided (for deck-specific RAG)
     where_clause = None
     if deck_ids:
         # Filter to only include slides/windows from specified decks
@@ -246,7 +535,7 @@ def retrieve_context(
             ]
         }
     
-    # 3. Query ChromaDB with all queries (with optional deck filtering)
+    # 4. Query ChromaDB with all queries (with optional deck filtering)
     results = collection.query(
         query_texts=queries,
         n_results=top_k,
@@ -254,14 +543,14 @@ def retrieve_context(
         include=["documents", "metadatas"],
     )
     
-    # 3. Flatten and deduplicate results
+    # 5. Flatten and deduplicate results
     seen = set()
     contexts = []
     slide_hits = []
     
     for docs, metas in zip(results.get("documents", []), results.get("metadatas", [])):
         for d, m in zip(docs, metas):
-            # 4. Create deduplication key based on chunk type
+            # 6. Create deduplication key based on chunk type
             chunk_type = m.get("chunk_type")
 
             # We have three types of chunks: slide, window, and page
@@ -280,7 +569,7 @@ def retrieve_context(
                 continue
             seen.add(key)
             
-            # 5. Build context dict with metadata
+            # 7. Build context dict with metadata
             context = {"text": d, "source": m.get("source")}
             
             if chunk_type == "slide":
@@ -295,7 +584,7 @@ def retrieve_context(
             
             contexts.append(context)
     
-    # 6. Expand neighbors for slide chunks if enabled
+    # 8. Expand neighbors for slide chunks if enabled
     if neighbor_expansion and slide_hits:
         neighbor_contexts = expand_slide_neighbors(slide_hits, neighbor_range)
         for ctx in neighbor_contexts:
@@ -304,7 +593,7 @@ def retrieve_context(
                 seen.add(key)
                 contexts.append(ctx)
     
-    # 7. Sort slide chunks by slide number
+    # 9. Sort slide chunks by slide number
     slide_contexts = [c for c in contexts if c.get("chunk_type") == "slide"]
     other_contexts = [c for c in contexts if c.get("chunk_type") != "slide"]
     

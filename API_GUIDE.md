@@ -8,6 +8,14 @@
 
 This API provides endpoints for ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB) and performing Retrieval-Augmented Generation (RAG) queries against the ingested content. The system uses local embeddings with sentence-transformers and Groq API for LLM generation. It also supports quiz generation from slide decks.
 
+**RAG Enhancements:** The system includes several intelligent enhancements:
+- **Context-Aware Query Expansion**: Uses conversation history to generate better search queries
+- **Conversation-Aware Query Reformulation**: Automatically reformulates contextual questions (e.g., "What was my previous question?") using conversation history
+- **Coding Question Decomposition**: Automatically breaks down coding questions into learning-focused sub-queries
+- **Question Type Detection & Routing**: Intelligently detects question types (coding, slide-specific, follow-up, comparative) and applies appropriate retrieval strategies
+- **Slide-Specific Retrieval**: Direct lookup for slide queries ("slide 17", "slides 1-10") instead of semantic search
+- **Context-Aware Answer Generation**: Uses conversation history for better answer continuity
+
 **Streaming Responses:** Several endpoints (`/rag/chat`, `/rag/deck-chat`, `/groq/general-llm`) use Server-Sent Events (SSE) to stream responses token-by-token for real-time display. See the [SSE Streaming](#server-sent-events-sse-streaming) section for details on handling these streams.
 
 ### Base URL
@@ -130,6 +138,14 @@ curl -X POST http://localhost:5000/rag/ingest \
 **Endpoint:** `POST /rag/chat`
 
 **Description:** Performs a RAG-powered query against the ingested documents. Retrieves relevant context chunks (from PDFs, slides, or both), generates an answer using Groq API, and streams the answer with source citations via Server-Sent Events (SSE). Supports both page-based chunks (from regular PDFs) and slide chunks (from slide decks).
+
+**Intelligent RAG Features:**
+- **Context-Aware Query Expansion**: Automatically expands queries using conversation history for better retrieval
+- **Query Reformulation**: Reformulates contextual questions (e.g., "What was my previous question?", "Which is better?") using conversation history
+- **Coding Question Decomposition**: For coding questions, automatically breaks down into learning-focused sub-queries (e.g., "Write I2C code for PIC18" → decomposes into language basics, hardware specs, protocol details, etc.)
+- **Question Type Detection**: Automatically detects question types and applies appropriate retrieval strategies
+- **Slide-Specific Queries**: Direct metadata lookup for slide queries (e.g., "slide 17", "slides 1-10") for precise results
+- **Context-Aware Answers**: Uses conversation history for better answer continuity and follow-up handling
 
 **Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
 
@@ -416,16 +432,71 @@ Groq API error:
 - The endpoint works with both page-based chunks (from `/rag/ingest`) and slide chunks (from `/rag/ingest-slides`)
 - For slide chunks, neighbor expansion is enabled by default (includes adjacent slides for context)
 - Sources may include a mix of pages, individual slides, and slide windows
+- **Coding questions** are automatically expanded into multiple sub-queries for comprehensive retrieval
+- **Slide-specific queries** (e.g., "Explain slide 17", "What's on slides 1-10") use direct metadata lookup for precise results
+- **Follow-up questions** (e.g., "What was my previous question?", "Which is better?") are automatically reformulated using conversation context
+
+**Example Enhanced Behaviors:**
+
+**1. Coding Question Decomposition:**
+```json
+{
+  "question": "Write I2C code for PIC18 temperature sensor",
+  "session_id": "session_123"
+}
+```
+The system automatically expands this into sub-queries like:
+- "What assembly language does PIC18 use?"
+- "How to create variables in PIC18?"
+- "I2C hardware in PIC18 example"
+- "I2C software in PIC18 example"
+- "Temperature sensor I2C protocol for PIC18"
+
+**2. Slide-Specific Queries:**
+```json
+{
+  "question": "Explain slide 17",
+  "session_id": "session_123"
+}
+```
+Uses direct metadata lookup to retrieve slide 17 exactly (not semantic search).
+
+**3. Follow-up Questions:**
+```json
+{
+  "messages": [
+    {"role": "user", "content": "What is an op amp?"},
+    {"role": "assistant", "content": "An operational amplifier..."},
+    {"role": "user", "content": "Which is better?"}
+  ],
+  "session_id": "session_123"
+}
+```
+The system automatically reformulates "Which is better?" to "Which op amp design is better for each use case?" using conversation context.
 
 ---
 
-### 4. Deck-Based Chat (No RAG)
+### 4. Deck-Based Chat
 
 **Endpoint:** `POST /rag/deck-chat`
 
 **Description:** Chat endpoint that uses RAG (Retrieval-Augmented Generation) to retrieve relevant slides from specified deck(s). Unlike the general `/rag/chat` endpoint, this endpoint filters semantic search to only include chunks from the specified deck_ids. This provides focused, deck-specific answers while still using intelligent semantic retrieval. Returns a streaming response via Server-Sent Events (SSE).
 
+**Intelligent RAG Features (Same as `/rag/chat`):**
+- **Context-Aware Query Expansion**: Uses conversation history for better query expansion
+- **Query Reformulation**: Reformulates contextual questions using conversation history
+- **Coding Question Decomposition**: Automatically decomposes coding questions into sub-queries
+- **Question Type Detection**: Detects question types and applies appropriate strategies
+- **Slide-Specific Retrieval**: Direct lookup for slide queries ("slide 17", "slides 1-10", "slides 1 to 10")
+- **Context-Aware Answers**: Uses conversation history for better continuity
+
 **Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
+
+**Slide-Specific Query Examples:**
+- `"Explain slide 17"` → Direct lookup of slide 17
+- `"What's on slides 1-10"` → Direct lookup of slides 1 through 10
+- `"Show me slides 5 to 15"` → Direct lookup of slides 5 through 15
+- `"What did slide 3 say?"` → Direct lookup of slide 3
 
 **Request Body (Simple Format - Single Turn):**
 
@@ -1604,15 +1675,20 @@ FROM json_populate_recordset(NULL::quiz_questions, '[...questions JSON...]');
 
 ---
 
-## Query Expansion
+## RAG Enhancements & Features
 
-When `use_query_expansion` is enabled (default: `true`) in `/rag/chat`, the system:
+### Query Expansion (Enhancement 1: Context-Aware Query Expansion)
+
+When `use_query_expansion` is enabled (default: `true`) in `/rag/chat` and `/rag/deck-chat`, the system:
 
 1. Takes your original question
-2. Uses Groq API to generate alternative phrasings (e.g., "operational amplifier fundamentals", "op‑amp input and output characteristics")
-3. Searches ChromaDB with all queries (original + expansions)
-4. Combines and deduplicates results
-5. Uses the best context chunks to generate the answer
+2. Uses conversation history (if available) to generate context-aware alternative phrasings
+3. Uses Groq API to generate alternative phrasings (e.g., "operational amplifier fundamentals", "op‑amp input and output characteristics")
+4. Searches ChromaDB with all queries (original + expansions)
+5. Combines and deduplicates results
+6. Uses the best context chunks to generate the answer
+
+**Enhancement:** Query expansion now uses conversation history to generate more relevant expansions. For example, if you previously asked about "op amps", a follow-up question "Which is better?" will expand using op amp context.
 
 This improves recall, especially for domain-specific terminology or when questions are phrased differently than the source material.
 
@@ -1624,6 +1700,90 @@ This improves recall, especially for domain-specific terminology or when questio
   "use_query_expansion": false
 }
 ```
+
+### Query Reformulation (Enhancement 2: Conversation-Aware Query Reformulation)
+
+The system automatically reformulates contextual questions using conversation history:
+
+**Examples:**
+- `"What was my previous question?"` → Reformulated to the actual previous question
+- `"Which is better?"` → Reformulated using what was being compared in the conversation
+- `"Repeat that"` → Reformulated to the original question being asked
+
+This works automatically - just include conversation history via `messages` array and `session_id`.
+
+### Coding Question Decomposition (Enhancement 3)
+
+For coding questions, the system automatically decomposes them into learning-focused sub-queries:
+
+**Example:**
+```
+Input: "Write I2C code for PIC18 temperature sensor"
+
+Expanded into:
+1. What assembly language does PIC18 use?
+2. How to create variables in PIC18?
+3. How to create 32-bit variables in PIC18?
+4. I2C hardware in PIC18 example
+5. I2C software in PIC18 example
+6. Temperature sensor I2C protocol for PIC18
+```
+
+The system then retrieves information for each sub-query and combines results for a comprehensive answer.
+
+**Automatic:** Works automatically for coding questions (detected by keywords like "write", "code", "implement", "syntax", etc.)
+
+### Question Type Detection & Routing (Enhancement 4)
+
+The system automatically detects question types and applies appropriate retrieval strategies:
+
+- **Direct Questions**: Normal semantic search
+- **Follow-up Questions**: Reformulated using conversation history
+- **Slide-Specific**: Direct metadata lookup (see below)
+- **Coding Questions**: Decomposed into sub-queries
+- **Comparative Questions**: Reformulated with context, higher `top_k` for better coverage
+
+**Automatic:** No configuration needed - works automatically based on question content.
+
+### Slide-Specific Retrieval (Enhancement 4: Part of Question Type Detection)
+
+For slide queries, the system uses direct metadata lookup instead of semantic search:
+
+**Supported Formats:**
+- Single slides: `"slide 17"`, `"#17"`, `"slide number 17"`
+- Ranges: `"slides 1-10"`, `"slides 1 to 10"`, `"slides 1 through 10"`
+
+**Examples:**
+```json
+{
+  "question": "Explain slide 17",
+  "deck_ids": ["deck_abc123"]
+}
+```
+→ Directly retrieves slide 17 (not semantic search)
+
+```json
+{
+  "question": "What's on slides 1 to 10?",
+  "deck_ids": ["deck_abc123"]
+}
+```
+→ Directly retrieves slides 1 through 10
+
+**Benefits:**
+- Precise results (no wrong slides returned)
+- Faster retrieval (direct lookup vs semantic search)
+- Works in both `/rag/chat` and `/rag/deck-chat`
+
+### Context-Aware Answer Generation (Enhancement 6)
+
+The system uses conversation history to generate better answers:
+
+- **Follow-up Continuity**: References previous answers when relevant
+- **Context Understanding**: Understands context of current question from conversation history
+- **Answer Coherence**: Maintains conversation flow and continuity
+
+**Automatic:** Works automatically when `messages` array or `session_id` is provided.
 
 ---
 
@@ -1750,11 +1910,14 @@ Each source includes:
 - **Ingestion (PDFs):** Processing time depends on PDF size and number of files. Large PDFs (e.g., 464 pages) may take several minutes.
 - **Ingestion (Slides):** Processing time depends on number of slides and OCR requirements. Typical deck (15-50 slides) takes 10-30 seconds.
 - **Query Response (`/rag/chat`):** Uses SSE streaming for real-time token delivery. First token typically arrives within 2-5 seconds. Total response time depends on:
-  - Query expansion (adds ~1-2 seconds if enabled)
+  - **Query expansion** (adds ~1-2 seconds if enabled) - Now context-aware, uses conversation history
+  - **Query reformulation** (adds ~0.5-1 second for contextual questions) - Automatic for follow-up questions
+  - **Coding question decomposition** (adds ~1-2 seconds) - Automatic for coding questions, generates multiple sub-queries
+  - **Slide-specific queries** - Faster than semantic search (direct metadata lookup)
   - Number of chunks retrieved
   - Groq API response time
   - Answer length (longer answers stream over more time)
-- **Deck Chat (`/rag/deck-chat`):** Uses SSE streaming. First token typically arrives within 3-7 seconds depending on deck size.
+- **Deck Chat (`/rag/deck-chat`):** Uses SSE streaming. First token typically arrives within 3-7 seconds depending on deck size. Same enhancements as `/rag/chat`.
 - **General LLM (`/groq/general-llm`):** Uses SSE streaming. First token typically arrives within 1-3 seconds.
 - **Quiz Generation (`/rag/generate-quiz`):** Processing time depends on:
   - Number of slides (more slides = longer LLM prompt)
@@ -1836,8 +1999,8 @@ All example responses in this document were taken directly from actual test runs
 | -------------------- | ------ | ---------------------------- | ------------------------------------------------- | -------------------------- | ------------- |
 | `/health`            | GET    | Health check                 | None                                              | "OK"                       | Plain text    |
 | `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary          | JSON          |
-| `/rag/chat`          | POST   | RAG-powered Q&A              | `question`, `top_k`, `use_query_expansion`        | Streaming answer + sources | SSE stream    |
-| `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered) | `question`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
+| `/rag/chat`          | POST   | RAG-powered Q&A (with intelligent enhancements) | `question`, `messages`, `session_id`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
+| `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered, with intelligent enhancements) | `question`, `messages`, `session_id`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
 | `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats          | JSON          |
 | `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready)  | JSON          |
 | `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`       | JSON          |
