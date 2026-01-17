@@ -101,18 +101,33 @@ def expand_query_via_groq(query: str, n: int = 4) -> List[str]:
 
 # Retrieves relevant chunks from ChromaDB
 # Supports query expansion and neighbor expansion for slides
+# If deck_ids is provided, filters results to only include chunks from those decks
 def retrieve_context(question: str, top_k: int = 5, use_query_expansion: bool = True,
-                    neighbor_expansion: bool = True, neighbor_range: int = 1) -> Tuple[List[Dict], List[str]]:
+                    neighbor_expansion: bool = True, neighbor_range: int = 1,
+                    deck_ids: Optional[List[str]] = None) -> Tuple[List[Dict], List[str]]:
     # 1. Build query list (original + expansions)
     queries = [question]
     if use_query_expansion:
         expanded = expand_query_via_groq(question, n=4)
         queries.extend(expanded)
     
-    # 2. Query ChromaDB with all queries
+    # 2. Build where clause if deck_ids provided (for deck-specific RAG)
+    where_clause = None
+    if deck_ids:
+        # Filter to only include slides/windows from specified decks
+        # For deck-specific modes, we only want slides/windows from those decks
+        where_clause = {
+            "$and": [
+                {"deck_id": {"$in": deck_ids}},
+                {"chunk_type": {"$in": ["slide", "window"]}}
+            ]
+        }
+    
+    # 3. Query ChromaDB with all queries (with optional deck filtering)
     results = collection.query(
         query_texts=queries,
         n_results=top_k,
+        where=where_clause,
         include=["documents", "metadatas"],
     )
     
@@ -208,7 +223,12 @@ def expand_slide_neighbors(slide_hits: List[Dict[str, Any]], neighbor_range: int
         # 3. Fetch neighbor slides from ChromaDB
         try:
             all_deck_results = collection.get(
-                where={"deck_id": deck_id, "chunk_type": "slide"},
+                where={
+                    "$and": [
+                        {"deck_id": deck_id},
+                        {"chunk_type": "slide"}
+                    ]
+                },
                 include=["documents", "metadatas"]
             )
             

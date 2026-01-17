@@ -134,8 +134,8 @@ def rag_chat():
         }), 500
 
 
-# Deck-based chat endpoint - retrieves ALL slides from specified decks
-# and attaches them to every prompt (no semantic search/RAG)
+# Deck-based chat endpoint - uses RAG to retrieve relevant slides from specified decks
+# Filters semantic search to only include chunks from the specified deck_ids
 # Supports conversation history via messages array and session_id
 @rag_bp.route("/deck-chat", methods=["POST"])
 def deck_chat():
@@ -182,117 +182,61 @@ def deck_chat():
     if not isinstance(deck_ids, list) or len(deck_ids) == 0:
         return jsonify({"error": "'deck_ids' must be a non-empty array."}), 400
 
+    # 3. Parse optional parameters with defaults
+    top_k = int(data.get("top_k", 5))
+    expand = bool(data.get("use_query_expansion", True))
+
+    # 4. Retrieve relevant context using RAG (filtered to specified deck_ids)
     try:
-        # 3. Retrieve ALL slides from specified decks (no semantic search)
-        slides = get_all_slides_from_decks(deck_ids)
+        ctx, used_queries = retrieve_context(
+            question,
+            top_k=top_k,
+            use_query_expansion=expand,
+            deck_ids=deck_ids  # Filter to only search within specified decks
+        )
         
-        if not slides:
+        if not ctx:
             return jsonify({
-                "error": f"No slides found for deck_ids: {deck_ids}"
+                "error": f"No relevant content found for deck_ids: {deck_ids}"
             }), 404
         
-        # 4. Format slides into context string
-        all_slides_content = build_slides_context(slides)
-        
-        # 5. Build messages for Groq with conversation management
-        if groq_client is None:
-            return jsonify({"error": "GROQ_API_KEY is missing or invalid."}), 500
-        
-        # Build base messages (system prompts)
-        base_messages = [
-            {
-                "role": "system",
-                "content": DECK_CHAT_SYSTEM_PROMPT
-            },
-            {
-                "role": "system",
-                "content": f"SLIDE DECK CONTENT:\n\n{all_slides_content}"
-            }
-        ]
-        
-        # Build conversation messages with rollup memory (handles session management)
-        # Note: We pass question as user_message for incremental mode, but it will be added at the end
-        messages = build_conversation_messages(
-            session_id=session_id,
-            user_message=question if not messages_array else None,
-            messages_array=messages_array,
-            base_messages=base_messages
-        )
-        
-        # Add current question as user message
-        # If messages_array was provided, the question is already in messages from session.messages
-        # If messages_array was not provided, shared function removed it in incremental mode, so we add it back
-        # Check if last message is already the question - if not, add it
-        if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != question:
-            messages.append({
-                "role": "user",
-                "content": question
-            })
-        
-        # 6. Format sources for response
+        # 5. Extract sources for UI display
         sources = []
-        for slide in slides:
-            sources.append({
-                "source": slide.get("deck_id"),
-                "slide_number": slide.get("slide_number"),
-                "slide_title": slide.get("slide_title", ""),
-                "chunk_type": "slide"
-            })
+        for c in ctx:
+            source_info = {"source": c.get("source", "unknown")}
+            if c.get("chunk_type") == "slide":
+                source_info["slide_number"] = c.get("slide_number")
+                source_info["chunk_type"] = "slide"
+            elif c.get("chunk_type") == "window":
+                source_info["start_slide"] = c.get("start_slide")
+                source_info["end_slide"] = c.get("end_slide")
+                source_info["chunk_type"] = "window"
+            else:
+                source_info["page"] = c.get("page")
+            sources.append(source_info)
         
-        # 7. Generate answer using Groq with SSE streaming
-        try:
-            response = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                temperature=0.2,
-                stream=True,
-            )
-        except Exception as e:
-            return jsonify({"error": "Error communicating with LLM provider.", "details": str(e)}), 502
-        
-        # Accumulator for storing full assistant response
-        assistant_response = ""
-        
-        def SSE():
-            nonlocal assistant_response
-            # Send metadata first
-            metadata = {
-                "question": question,
-                "deck_ids": deck_ids,
-                "total_slides": len(slides),
-                "sources": sources
-            }
-            yield f"event: metadata\ndata: {json.dumps(metadata)}\n\n"
-            
-            # Stream the response
-            try:
-                for chunk in response:
-                    content = getattr(getattr(chunk.choices[0], "delta", None), "content", None)
-                    if content:
-                        # Convert em-spaces to newlines as safety measure [this bug took 2hours out of my life]
-                        content = content.replace('\u2003', '\n')
-                        assistant_response += content
-                        yield f"data: {json.dumps(content)}\n\n"
-            except Exception as e:
-                yield f"event: error\ndata: {str(e)}\n\n"
-            finally:
-                # Store assistant response in session if session_id is provided
-                if session_id and assistant_response:
-                    storage = get_storage()
-                    storage.add_message(session_id, "assistant", assistant_response)
-                
-                yield "event: done\ndata: [DONE]\n\n"
-        
-        # 8. Return SSE response
-        return Response(
-            SSE(),
-            mimetype='text/event-stream',
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+        # 6. Generate answer using Groq with retrieved context (returns Response for SSE)
+        metadata = {
+            "question": question,
+            "deck_ids": deck_ids,
+            "used_queries": used_queries,
+            "sources": sources
+        }
+        gen_response = generate_answer(
+            question, 
+            ctx, 
+            metadata=metadata,
+            session_id=session_id,
+            messages_array=messages_array
         )
-    
+        
+        # 7. Check if it's an error dict instead of Response
+        if isinstance(gen_response, dict) and "error" in gen_response:
+            return jsonify({"error": gen_response["error"]}), 500
+        
+        # 8. Return the SSE Response
+        return gen_response
+        
     except Exception as e:
         return jsonify({
             "error": "Deck chat failed",
@@ -451,17 +395,37 @@ def generate_quiz():
         return jsonify({"error": "'question_counts' must request at least one question (> 0)."}), 400
     
     try:
-
-        # 4. Get all slides from all specified decks
-        slides = get_all_slides_from_decks(deck_ids)
+        # 4. Use RAG to retrieve comprehensive content from specified decks
+        # For quiz generation, we use a broad query to get comprehensive coverage
+        # We use a high top_k to get more slides for better quiz coverage
+        quiz_query = quiz_description if quiz_description else "Generate comprehensive quiz questions covering all key concepts and topics"
         
-        if not slides:
+        # Retrieve context with high top_k for comprehensive coverage
+        ctx, used_queries = retrieve_context(
+            quiz_query,
+            top_k=30,  # Higher top_k for comprehensive quiz generation
+            use_query_expansion=True,
+            deck_ids=deck_ids  # Filter to only search within specified decks
+        )
+        
+        if not ctx:
             return jsonify({
-                "error": f"No slides found for deck_ids: {deck_ids}"
+                "error": f"No relevant content found for deck_ids: {deck_ids}"
             }), 404
         
-        # 5. Format all slides into context for LLM
-        all_content = build_slides_context(slides)
+        # 5. Format retrieved contexts into content string for LLM
+        # Build context similar to how build_slides_context works
+        all_content_parts = []
+        for c in ctx:
+            text = (c.get("text") or "").strip()
+            if text:
+                all_content_parts.append(text)
+        all_content = "\n\n---\n\n".join(all_content_parts).strip()
+        
+        if not all_content:
+            return jsonify({
+                "error": f"No content retrieved for deck_ids: {deck_ids}"
+            }), 404
         
         # 6. Build quiz generation prompt
         quiz_prompt = build_quiz_generation_prompt(
@@ -552,7 +516,7 @@ def generate_quiz():
         # 12. Return quiz in database-ready format
         return jsonify({
             "deck_ids": deck_ids,
-            "total_slides": len(slides),
+            "contexts_retrieved": len(ctx),
             "question_count": len(formatted_questions),
             "question_type": response_question_type,
             "question_counts": requested_counts,

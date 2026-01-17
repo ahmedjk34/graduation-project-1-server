@@ -423,7 +423,7 @@ Groq API error:
 
 **Endpoint:** `POST /rag/deck-chat`
 
-**Description:** Chat endpoint that retrieves ALL slides from specified deck(s) and attaches them to every prompt. Unlike the RAG chat endpoint, this does NOT perform semantic search - it simply loads all slides from the deck(s) and includes them in the context for every question. Use this when you want to chat about specific slide decks without selective retrieval. Returns a streaming response via Server-Sent Events (SSE).
+**Description:** Chat endpoint that uses RAG (Retrieval-Augmented Generation) to retrieve relevant slides from specified deck(s). Unlike the general `/rag/chat` endpoint, this endpoint filters semantic search to only include chunks from the specified deck_ids. This provides focused, deck-specific answers while still using intelligent semantic retrieval. Returns a streaming response via Server-Sent Events (SSE).
 
 **Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
 
@@ -454,7 +454,9 @@ Groq API error:
 
 - `question` (required if `messages` not provided): The question to ask (single-turn mode)
 - `messages` (required if `question` not provided): Array of conversation messages with `role` ("user" or "assistant") and `content` (string). Frontend should send full conversation history each time.
-- `deck_ids` (required): Array of deck IDs to retrieve slides from (get these from `/rag/ingest-slides`)
+- `deck_ids` (required): Array of deck IDs to filter RAG search to (get these from `/rag/ingest-slides`)
+- `top_k` (optional): Number of top results to retrieve (default: 5)
+- `use_query_expansion` (optional): Whether to use query expansion for better retrieval (default: true)
 - `session_id` (optional): Unique identifier for conversation session. Enables automatic conversation management with fixed window (30 messages) and rollup memory for older messages.
 
 **Conversation Management:**
@@ -547,7 +549,7 @@ This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: 
 
    ```
    event: metadata
-   data: {"question":"What are the main topics covered in these slides?","deck_ids":["pptx_deck_abc123"],"total_slides":25,"sources":[...]}
+   data: {"question":"What are the main topics covered in these slides?","deck_ids":["pptx_deck_abc123"],"used_queries":[...],"sources":[...]}
    ```
 
 2. **Token events** (streamed as they arrive):
@@ -567,13 +569,14 @@ This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: 
 **Response Fields (in metadata event):**
 
 - `question`: The original question asked
-- `deck_ids`: Array of deck IDs used
-- `total_slides`: Total number of slides loaded and attached to context
-- `sources`: Array of all slides from the deck(s), each containing:
-  - `source`: The deck_id
-  - `slide_number`: Slide number
-  - `slide_title`: Title of the slide
-  - `chunk_type`: Always "slide"
+- `deck_ids`: Array of deck IDs used for filtering
+- `used_queries`: Array of queries used (original + expanded queries for semantic search)
+- `sources`: Array of retrieved contexts, each containing:
+  - `source`: The deck_id or document source
+  - `slide_number`: Slide number (for slide chunks)
+  - `start_slide`, `end_slide`: Slide range (for window chunks)
+  - `page`: Page number (for page chunks)
+  - `chunk_type`: "slide", "window", or "page"
 
 **Example Metadata Event Data:**
 
@@ -581,21 +584,25 @@ This endpoint returns a **Server-Sent Events (SSE) stream** with `Content-Type: 
 {
   "question": "What are the main topics covered in these slides?",
   "deck_ids": ["pptx_deck_abc123"],
-  "total_slides": 25,
+  "used_queries": [
+    "What are the main topics covered in these slides?",
+    "What topics are discussed in the presentation?",
+    "What are the key subjects in the slides?",
+    "What content is covered in the deck?"
+  ],
   "sources": [
     {
       "source": "pptx_deck_abc123",
       "slide_number": 1,
-      "slide_title": "Introduction to Op-Amps",
       "chunk_type": "slide"
     },
     {
       "source": "pptx_deck_abc123",
-      "slide_number": 2,
-      "slide_title": "Basic Configurations",
-      "chunk_type": "slide"
+      "start_slide": 2,
+      "end_slide": 5,
+      "chunk_type": "window"
     }
-    // ... all slides from the deck(s)
+    // ... top-k most relevant chunks from the specified deck(s)
   ]
 }
 ```
@@ -698,11 +705,11 @@ Invalid deck_ids format:
 }
 ```
 
-No slides found:
+No relevant content found:
 
 ```json
 {
-  "error": "No slides found for deck_ids: ['pptx_deck_abc123']"
+  "error": "No relevant content found for deck_ids: ['pptx_deck_abc123']"
 }
 ```
 
@@ -716,21 +723,23 @@ Groq API error:
 
 **Notes:**
 
-- **No RAG/Semantic Search**: This endpoint loads ALL slides from the specified deck(s) and attaches them to every prompt - no semantic search is performed
-- **Multiple Decks**: You can specify multiple deck_ids to combine slides from different decks
-- **Sequential Order**: Slides are sorted by deck_id and slide_number to maintain order
-- **Use Case**: Ideal for tutoring/Q&A sessions where you want to discuss a specific slide deck comprehensively
-- **Context Size**: Be mindful that large decks may hit token limits - consider splitting very large decks or using the regular `/rag/chat` endpoint for selective retrieval
+- **RAG with Deck Filtering**: This endpoint uses semantic search (RAG) but filters results to only include chunks from the specified deck_ids
+- **Multiple Decks**: You can specify multiple deck_ids to search across multiple decks simultaneously
+- **Query Expansion**: By default, uses query expansion to find relevant content with different wording
+- **Neighbor Expansion**: Automatically includes neighboring slides (±1) when a slide chunk is retrieved for better context
+- **Use Case**: Ideal for deck-specific tutoring/Q&A where you want focused answers from specific slide decks
+- **Efficient**: Only retrieves top-k most relevant chunks, avoiding token limit issues with large decks
 - **Get deck_ids**: Use the `/rag/ingest-slides` endpoint to upload decks and get their deck_ids
 
 **Comparison with /rag/chat:**
 
 | Feature   | /rag/chat                      | /rag/deck-chat                     |
 | --------- | ------------------------------ | ---------------------------------- |
-| Retrieval | Semantic search (RAG)          | All slides from deck(s)            |
-| Context   | Top-k relevant chunks          | All slides                         |
+| Retrieval | Semantic search (RAG)          | Semantic search (RAG) with deck filtering |
+| Context   | Top-k relevant chunks (all sources) | Top-k relevant chunks (filtered to deck_ids) |
 | Use Case  | Broad knowledge base queries   | Deck-specific tutoring             |
-| Sources   | Mixed (pages, slides, windows) | Only slides from specified deck(s) |
+| Sources   | Mixed (pages, slides, windows) | Only slides/windows from specified deck(s) |
+| Filtering | None (searches entire DB)       | Metadata filter by deck_id         |
 
 ---
 
@@ -875,7 +884,7 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 
 **Endpoint:** `POST /rag/generate-quiz`
 
-**Description:** Generates quiz questions from one or more slide decks. Retrieves ALL slides from specified deck(s), sends them to the LLM with custom instructions, and returns quiz questions in a database-ready format matching your `quiz_questions` table structure.
+**Description:** Generates quiz questions from one or more slide decks using RAG (Retrieval-Augmented Generation). Uses semantic search to retrieve comprehensive, relevant content from the specified deck(s), then sends the retrieved contexts to the LLM with custom instructions. Returns quiz questions in a database-ready format matching your `quiz_questions` table structure.
 
 **Request Body:**
 
@@ -958,7 +967,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
 ```json
 {
   "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"],
-  "total_slides": 50,
+  "contexts_retrieved": 30,
   "question_count": 15,
   "question_type": "mixed",
   "question_counts": {
@@ -997,7 +1006,7 @@ curl -X POST http://localhost:5000/rag/generate-quiz \
 **Response Fields:**
 
 - `deck_ids`: Array of deck IDs used for quiz generation
-- `total_slides`: Total number of slides retrieved from all decks
+- `contexts_retrieved`: Number of relevant contexts retrieved via RAG (slide/window chunks)
 - `question_count`: Number of questions generated
 - `question_type`: `"mixed"` when multiple types were requested, otherwise the single requested type
 - `question_counts`: Object showing the requested per-type counts
@@ -1047,11 +1056,11 @@ Missing question_counts (400):
 }
 ```
 
-No slides found (404):
+No relevant content found (404):
 
 ```json
 {
-  "error": "No slides found for deck_ids: ['pptx_deck_abc123']"
+  "error": "No relevant content found for deck_ids: ['pptx_deck_abc123']"
 }
 ```
 
@@ -1074,12 +1083,13 @@ Groq API error (500):
 
 **Notes:**
 
-- **Multiple Decks**: You can pass multiple `deck_ids` to combine slides from different decks into one quiz
-- **Direct Retrieval**: Unlike `/rag/chat`, this endpoint uses direct metadata filtering (not semantic search) to get ALL slides from the specified decks
+- **Multiple Decks**: You can pass multiple `deck_ids` to search across different decks simultaneously
+- **RAG-Based Retrieval**: Uses semantic search (RAG) with deck filtering to retrieve comprehensive, relevant content (top-30 contexts by default for broad coverage)
+- **Query Expansion**: Uses query expansion based on `quiz_description` to find relevant content with different wording
 - **Database-Ready Format**: The response is formatted to match your `quiz_questions` table structure - just add `module_id` and insert
-- **Custom Instructions**: Use `quiz_description` to guide the AI (e.g., focus on specific slides, emphasize certain topics)
+- **Custom Instructions**: Use `quiz_description` to guide both the RAG retrieval and the quiz generation (e.g., "Focus on op-amps and filters" will retrieve relevant slides and generate questions on those topics)
 - **Question Types**: Supports multiple choice (4 options), true/false (2 options), and short answer (no options)
-- The endpoint retrieves slides in order (sorted by deck_id, then slide_number) to maintain context
+- **Comprehensive Coverage**: Uses high top_k (30) to ensure broad coverage of topics for quiz generation
 
 **Example Workflow:**
 
@@ -1771,7 +1781,7 @@ Each source includes:
 
 ### Quiz Generation Errors
 
-- **"No slides found for deck_ids"**: Verify the `deck_id` exists. Re-ingest the slide deck if needed.
+- **"No relevant content found for deck_ids"**: Verify the `deck_id` exists and contains slides. Re-ingest the slide deck if needed. The query may also be too specific - try a broader query.
 - **"Failed to parse quiz JSON"**: The LLM may have returned invalid JSON. Check the `raw_response` field in the error. This is usually rare but can happen with very large prompts.
 - **Slow response**: For large decks (100+ slides), consider using `quiz_description` to limit focus to specific slides
 
@@ -1827,7 +1837,7 @@ All example responses in this document were taken directly from actual test runs
 | `/health`            | GET    | Health check                 | None                                              | "OK"                       | Plain text    |
 | `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary          | JSON          |
 | `/rag/chat`          | POST   | RAG-powered Q&A              | `question`, `top_k`, `use_query_expansion`        | Streaming answer + sources | SSE stream    |
-| `/rag/deck-chat`     | POST   | Deck-based chat (no RAG)     | `question`, `deck_ids`                            | Streaming answer + sources | SSE stream    |
+| `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered) | `question`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
 | `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats          | JSON          |
 | `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready)  | JSON          |
 | `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`       | JSON          |
