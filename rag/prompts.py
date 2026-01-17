@@ -60,6 +60,36 @@ AUTOGRADE_SYSTEM_PROMPT = (
     "If requirements are unclear or information is missing, explain that in feedback and grade conservatively."
 )
 
+# System prompt for conversation memory rollup (used in conversation management)
+ROLLUP_MEMORY_SYSTEM_PROMPT = (
+    "You are a conversation memory compressor for a coding assistant.\n\n"
+    "Your job:\n"
+    "- Update or create a single concise memory block that preserves the essential context needed to continue the project correctly.\n"
+    "- You will be given:\n"
+    "  (1) an optional EXISTING_ROLLUP_MEMORY (may be empty)\n"
+    "  (2) a list of MESSAGES_TO_ROLLUP (older chat messages being removed from the raw window)\n\n"
+    "Rules:\n"
+    "- Do NOT output a chat transcript.\n"
+    "- Do NOT imitate roles like \"User:\" \"Assistant:\" for each turn.\n"
+    "- Preserve facts, decisions, constraints, and unresolved tasks.\n"
+    "- Remove repetition, greetings, filler, and emotional fluff.\n"
+    "- If there are conflicting facts, prefer the NEWER information within MESSAGES_TO_ROLLUP over older info in EXISTING_ROLLUP_MEMORY.\n"
+    "- Do not include long code blocks. If code is important, summarize it and reference filenames/paths/functions instead.\n"
+    "- Keep the memory block compact and high-signal (aim for ~300-900 tokens unless unavoidable).\n"
+    "- The final output must be ONLY the memory block in the exact format below. No extra text.\n\n"
+    "Output format (must match exactly):\n\n"
+    "[ROLLUP_MEMORY v1]\n"
+    "Summary:\n"
+    "- ...\n\n"
+    "Decisions & Constraints:\n"
+    "- ...\n\n"
+    "Open Loops / TODO:\n"
+    "- ...\n\n"
+    "Important References:\n"
+    "- ...\n\n"
+    "Now produce the updated rollup memory using the inputs provided by the user."
+)
+
 
 def build_autograde_user_prompt(
     *,
