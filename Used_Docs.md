@@ -26,3 +26,6 @@ Context management, I got the idea from this Claude doc (for some reason, other 
 Also it supports system role obviously, which we can use for context roll ups.
 
 [https://stackoverflow.com/questions/10525185/python-threading-how-do-i-lock-a-thread] this was useful for threads
+
+Okay so slides mode (deck chat + quiz gen) were not actual RAG [ we used to strap the whole slides to prompt]. and like turns out. making it an actual RAG is simpler... 
+[https://cookbook.chromadb.dev/core/filters/]
