@@ -9,6 +9,7 @@
 This API provides endpoints for ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB) and performing Retrieval-Augmented Generation (RAG) queries against the ingested content. The system uses local embeddings with sentence-transformers and Groq API for LLM generation. It also supports quiz generation from slide decks.
 
 **RAG Enhancements:** The system includes several intelligent enhancements:
+
 - **Context-Aware Query Expansion**: Uses conversation history to generate better search queries
 - **Conversation-Aware Query Reformulation**: Automatically reformulates contextual questions (e.g., "What was my previous question?") using conversation history
 - **Coding Question Decomposition**: Automatically breaks down coding questions into learning-focused sub-queries
@@ -52,36 +53,31 @@ OK
 
 **Endpoint:** `POST /rag/ingest`
 
-**Description:** Ingests all PDF files from a specified directory into ChromaDB. Extracts text, chunks it, and stores with metadata (source file and page numbers).
+**Description:** Ingests a single PDF file into ChromaDB. Extracts text, chunks it, and stores with metadata (source file and page numbers).
 
-**Request Body:**
+**Request Format:**
 
-```json
-{
-  "data_dir": "./data" // Optional, defaults to "./data"
-}
-```
+This endpoint expects **multipart/form-data** (file upload).
+
+**Parameters:**
+
+- `file` (required): The PDF file to ingest
 
 #### cURL Example
 
 ```bash
 curl -X POST http://localhost:5000/rag/ingest \
-     -H "Content-Type: application/json" \
-     -d '{"data_dir":"./data"}'
+     -F "file=@document.pdf"
 ```
 
 #### Postman Example
 
 1. **Method:** `POST`
 2. **URL:** `http://localhost:5000/rag/ingest`
-3. **Headers:**
-   - `Content-Type: application/json`
-4. **Body (raw JSON):**
-   ```json
-   {
-     "data_dir": "./data"
-   }
-   ```
+3. **Body:**
+   - Select `form-data`
+   - Add key: `file` (type: File)
+   - Select your PDF file
 
 **Response:**
 
@@ -90,16 +86,16 @@ curl -X POST http://localhost:5000/rag/ingest \
   "status": "ok",
   "summary": {
     "collection": "najah-circuits",
-    "count_in_collection": 1407,
+    "storage_path": "./chroma_storage",
     "files_indexed": [
       {
-        "chunks": 1407,
         "file": "op_amps_everyone.pdf",
-        "pages": 464
+        "pages": 464,
+        "chunks": 1407
       }
     ],
-    "storage_path": "./chroma_storage",
-    "total_chunks": 1407
+    "total_chunks": 1407,
+    "count_in_collection": 1407
   }
 }
 ```
@@ -107,16 +103,46 @@ curl -X POST http://localhost:5000/rag/ingest \
 **Response Fields:**
 
 - `status`: Status of the operation ("ok" or "error")
-- `summary.collection`: Name of the ChromaDB collection
-- `summary.count_in_collection`: Total number of chunks in the collection
-- `summary.files_indexed`: Array of objects containing:
-  - `file`: Name of the PDF file
-  - `pages`: Number of pages extracted
-  - `chunks`: Number of chunks created from the file
-- `summary.storage_path`: Path where ChromaDB stores data
-- `summary.total_chunks`: Total chunks indexed in this operation
+- `summary`: Object containing ingestion details
+  - `collection`: Name of the ChromaDB collection
+  - `storage_path`: Path where ChromaDB stores data
+  - `files_indexed`: Array containing information about the ingested file
+    - `file`: Name of the PDF file ingested
+    - `pages`: Number of pages extracted
+    - `chunks`: Number of chunks created from the file
+  - `total_chunks`: Total chunks indexed in this operation
+  - `count_in_collection`: Total number of chunks in the collection after ingestion
 
-**Error Response:**
+**Error Responses:**
+
+Missing file (400):
+
+```json
+{
+  "status": "error",
+  "error": "No file provided. Use 'file' field in multipart/form-data."
+}
+```
+
+No file selected (400):
+
+```json
+{
+  "status": "error",
+  "error": "No file selected."
+}
+```
+
+Invalid file type (400):
+
+```json
+{
+  "status": "error",
+  "error": "Only PDF files are supported."
+}
+```
+
+Ingestion error (500):
 
 ```json
 {
@@ -127,9 +153,10 @@ curl -X POST http://localhost:5000/rag/ingest \
 
 **Notes:**
 
-- The ingestion process logs "Processing file {filename}" for each file being processed
-- Files with no extractable text or chunks are skipped with warnings
-- Re-running ingestion on the same files will update existing chunks (upsert operation)
+- The ingestion process logs "Processing file {filename}" to the console
+- Files with no extractable text will result in an error
+- Re-running ingestion on the same file will update existing chunks (upsert operation)
+- Each chunk is uniquely identified by filename, page number, and chunk index
 
 ---
 
@@ -140,6 +167,7 @@ curl -X POST http://localhost:5000/rag/ingest \
 **Description:** Performs a RAG-powered query against the ingested documents. Retrieves relevant context chunks (from PDFs, slides, or both), generates an answer using Groq API, and streams the answer with source citations via Server-Sent Events (SSE). Supports both page-based chunks (from regular PDFs) and slide chunks (from slide decks).
 
 **Intelligent RAG Features:**
+
 - **Context-Aware Query Expansion**: Automatically expands queries using conversation history for better retrieval
 - **Query Reformulation**: Reformulates contextual questions (e.g., "What was my previous question?", "Which is better?") using conversation history
 - **Coding Question Decomposition**: For coding questions, automatically breaks down into learning-focused sub-queries (e.g., "Write I2C code for PIC18" → decomposes into language basics, hardware specs, protocol details, etc.)
@@ -163,10 +191,14 @@ curl -X POST http://localhost:5000/rag/ingest \
 
 ```json
 {
-  "messages": [ // Required (if question not provided)
-    {"role": "user", "content": "What is an Op-amp?"},
-    {"role": "assistant", "content": "An operational amplifier (op-amp) is..."},
-    {"role": "user", "content": "How does it work in a circuit?"}
+  "messages": [
+    // Required (if question not provided)
+    { "role": "user", "content": "What is an Op-amp?" },
+    {
+      "role": "assistant",
+      "content": "An operational amplifier (op-amp) is..."
+    },
+    { "role": "user", "content": "How does it work in a circuit?" }
   ],
   "session_id": "session_123", // Optional: for conversation management
   "top_k": 5, // Optional, default: 5
@@ -185,6 +217,7 @@ curl -X POST http://localhost:5000/rag/ingest \
 **Conversation Management:**
 
 When `session_id` is provided, the backend automatically:
+
 - Keeps the last 30 messages (15 turns) as raw conversation history
 - Compresses older messages into rollup memory when the limit is exceeded
 - Includes rollup memory as context in every request
@@ -193,6 +226,7 @@ When `session_id` is provided, the backend automatically:
 **Message Format:**
 
 Each message in the `messages` array must have:
+
 - `role`: Either `"user"` or `"assistant"`
 - `content`: The message text (string)
 
@@ -228,6 +262,7 @@ curl -X POST http://localhost:5000/rag/chat \
 3. **Headers:**
    - `Content-Type: application/json`
 4. **Body (raw JSON) - Simple format:**
+
    ```json
    {
      "question": "What is an Op-amp?",
@@ -235,14 +270,15 @@ curl -X POST http://localhost:5000/rag/chat \
      "use_query_expansion": true
    }
    ```
-   
+
    **Body (raw JSON) - Conversation format:**
+
    ```json
    {
      "messages": [
-       {"role": "user", "content": "What is an Op-amp?"},
-       {"role": "assistant", "content": "An operational amplifier..."},
-       {"role": "user", "content": "How does it work?"}
+       { "role": "user", "content": "What is an Op-amp?" },
+       { "role": "assistant", "content": "An operational amplifier..." },
+       { "role": "user", "content": "How does it work?" }
      ],
      "session_id": "my_session_123",
      "top_k": 5,
@@ -330,13 +366,13 @@ let conversationHistory = [];
 async function askQuestion(question) {
   // Add user message to history
   conversationHistory.push({ role: "user", content: question });
-  
+
   const response = await fetch("http://localhost:5000/rag/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages: conversationHistory,
-      session_id: sessionId
+      session_id: sessionId,
     }),
   });
 
@@ -439,13 +475,16 @@ Groq API error:
 **Example Enhanced Behaviors:**
 
 **1. Coding Question Decomposition:**
+
 ```json
 {
   "question": "Write I2C code for PIC18 temperature sensor",
   "session_id": "session_123"
 }
 ```
+
 The system automatically expands this into sub-queries like:
+
 - "What assembly language does PIC18 use?"
 - "How to create variables in PIC18?"
 - "I2C hardware in PIC18 example"
@@ -453,25 +492,29 @@ The system automatically expands this into sub-queries like:
 - "Temperature sensor I2C protocol for PIC18"
 
 **2. Slide-Specific Queries:**
+
 ```json
 {
   "question": "Explain slide 17",
   "session_id": "session_123"
 }
 ```
+
 Uses direct metadata lookup to retrieve slide 17 exactly (not semantic search).
 
 **3. Follow-up Questions:**
+
 ```json
 {
   "messages": [
-    {"role": "user", "content": "What is an op amp?"},
-    {"role": "assistant", "content": "An operational amplifier..."},
-    {"role": "user", "content": "Which is better?"}
+    { "role": "user", "content": "What is an op amp?" },
+    { "role": "assistant", "content": "An operational amplifier..." },
+    { "role": "user", "content": "Which is better?" }
   ],
   "session_id": "session_123"
 }
 ```
+
 The system automatically reformulates "Which is better?" to "Which op amp design is better for each use case?" using conversation context.
 
 ---
@@ -483,6 +526,7 @@ The system automatically reformulates "Which is better?" to "Which op amp design
 **Description:** Chat endpoint that uses RAG (Retrieval-Augmented Generation) to retrieve relevant slides from specified deck(s). Unlike the general `/rag/chat` endpoint, this endpoint filters semantic search to only include chunks from the specified deck_ids. This provides focused, deck-specific answers while still using intelligent semantic retrieval. Returns a streaming response via Server-Sent Events (SSE).
 
 **Intelligent RAG Features (Same as `/rag/chat`):**
+
 - **Context-Aware Query Expansion**: Uses conversation history for better query expansion
 - **Query Reformulation**: Reformulates contextual questions using conversation history
 - **Coding Question Decomposition**: Automatically decomposes coding questions into sub-queries
@@ -493,6 +537,7 @@ The system automatically reformulates "Which is better?" to "Which op amp design
 **Supports conversation history** via `messages` array and `session_id` for multi-turn conversations with automatic rollup memory management.
 
 **Slide-Specific Query Examples:**
+
 - `"Explain slide 17"` → Direct lookup of slide 17
 - `"What's on slides 1-10"` → Direct lookup of slides 1 through 10
 - `"Show me slides 5 to 15"` → Direct lookup of slides 5 through 15
@@ -511,10 +556,11 @@ The system automatically reformulates "Which is better?" to "Which op amp design
 
 ```json
 {
-  "messages": [ // Required (if question not provided)
-    {"role": "user", "content": "Explain the concept from slide 5"},
-    {"role": "assistant", "content": "The concept from slide 5 is..."},
-    {"role": "user", "content": "What about slide 10?"}
+  "messages": [
+    // Required (if question not provided)
+    { "role": "user", "content": "Explain the concept from slide 5" },
+    { "role": "assistant", "content": "The concept from slide 5 is..." },
+    { "role": "user", "content": "What about slide 10?" }
   ],
   "deck_ids": ["pptx_deck_abc123", "pdf_deck_xyz789"], // Required: array of deck IDs
   "session_id": "session_123" // Optional: for conversation management
@@ -533,6 +579,7 @@ The system automatically reformulates "Which is better?" to "Which op amp design
 **Conversation Management:**
 
 When `session_id` is provided, the backend automatically:
+
 - Keeps the last 30 messages (15 turns) as raw conversation history
 - Compresses older messages into rollup memory when the limit is exceeded
 - Includes rollup memory as context in every request
@@ -543,12 +590,14 @@ When `session_id` is provided, the backend automatically:
 ⚠️ **Critical:** The `messages` array **cannot be empty**. If you send an empty array `[]`, the backend will return an error: `"'messages' array cannot be empty."`
 
 **For new chats, you have two options:**
+
 1. **Use single-turn mode:** Send `{"question": "your question", "session_id": "chat_id", "deck_ids": [...]}` (recommended for first message)
 2. **Use messages format:** Send `{"messages": [{"role": "user", "content": "your question"}], "session_id": "chat_id", "deck_ids": [...]}` (must have at least 1 message)
 
 **Message Format:**
 
 Each message in the `messages` array must have:
+
 - `role`: Either `"user"` or `"assistant"`
 - `content`: The message text (string)
 
@@ -592,20 +641,22 @@ curl -X POST http://localhost:5000/rag/deck-chat \
 3. **Headers:**
    - `Content-Type: application/json`
 4. **Body (raw JSON) - Simple format:**
+
    ```json
    {
      "question": "What are the main topics covered in these slides?",
      "deck_ids": ["pptx_deck_abc123"]
    }
    ```
-   
+
    **Body (raw JSON) - Conversation format:**
+
    ```json
    {
      "messages": [
-       {"role": "user", "content": "What are the main topics?"},
-       {"role": "assistant", "content": "The main topics are..."},
-       {"role": "user", "content": "Explain topic 1 in detail"}
+       { "role": "user", "content": "What are the main topics?" },
+       { "role": "assistant", "content": "The main topics are..." },
+       { "role": "user", "content": "Explain topic 1 in detail" }
      ],
      "deck_ids": ["pptx_deck_abc123"],
      "session_id": "my_session_123"
@@ -688,14 +739,14 @@ let conversationHistory = [];
 async function askDeckQuestion(question, deckIds) {
   // Add user message to history
   conversationHistory.push({ role: "user", content: question });
-  
+
   const response = await fetch("http://localhost:5000/rag/deck-chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages: conversationHistory,
       deck_ids: deckIds,
-      session_id: sessionId
+      session_id: sessionId,
     }),
   });
 
@@ -804,13 +855,13 @@ Groq API error:
 
 **Comparison with /rag/chat:**
 
-| Feature   | /rag/chat                      | /rag/deck-chat                     |
-| --------- | ------------------------------ | ---------------------------------- |
-| Retrieval | Semantic search (RAG)          | Semantic search (RAG) with deck filtering |
+| Feature   | /rag/chat                           | /rag/deck-chat                               |
+| --------- | ----------------------------------- | -------------------------------------------- |
+| Retrieval | Semantic search (RAG)               | Semantic search (RAG) with deck filtering    |
 | Context   | Top-k relevant chunks (all sources) | Top-k relevant chunks (filtered to deck_ids) |
-| Use Case  | Broad knowledge base queries   | Deck-specific tutoring             |
-| Sources   | Mixed (pages, slides, windows) | Only slides/windows from specified deck(s) |
-| Filtering | None (searches entire DB)       | Metadata filter by deck_id         |
+| Use Case  | Broad knowledge base queries        | Deck-specific tutoring                       |
+| Sources   | Mixed (pages, slides, windows)      | Only slides/windows from specified deck(s)   |
+| Filtering | None (searches entire DB)           | Metadata filter by deck_id                   |
 
 ---
 
@@ -914,14 +965,12 @@ Missing dependency (500):
 **How Slide Ingestion Works:**
 
 1. **Text Extraction**:
-
    - PPTX: Extracts text from text frames, preserves bullet structure, detects images
    - PDF: Extracts text blocks and image references using PyMuPDF
 
 2. **OCR Decision**: Slides are OCR'd if native text is low (< 50 chars) AND slides have images, or if a large image dominates the slide (> 40% area). OCR is optional - ingestion succeeds without it but image-heavy slides may have missing text.
 
 3. **Chunking Strategy**:
-
    - **Slide chunks**: One chunk per slide (precision) with metadata: `chunk_type: "slide"`, `deck_id`, `slide_number`, `slide_title`, `has_ocr`
    - **Window chunks**: 10 slides per window, stride of 7 (30% overlap) for topic continuity, metadata: `chunk_type: "window"`, `deck_id`, `start_slide`, `end_slide`
 
@@ -1190,10 +1239,14 @@ Groq API error (500):
 
 ```json
 {
-  "messages": [ // Required (if prompt not provided)
-    {"role": "user", "content": "Explain how a transistor works"},
-    {"role": "assistant", "content": "A transistor is a semiconductor device..."},
-    {"role": "user", "content": "What are the different types?"}
+  "messages": [
+    // Required (if prompt not provided)
+    { "role": "user", "content": "Explain how a transistor works" },
+    {
+      "role": "assistant",
+      "content": "A transistor is a semiconductor device..."
+    },
+    { "role": "user", "content": "What are the different types?" }
   ],
   "session_id": "session_123" // Optional: for conversation management
 }
@@ -1208,6 +1261,7 @@ Groq API error (500):
 **Conversation Management:**
 
 When `session_id` is provided, the backend automatically:
+
 - Keeps the last 30 messages (15 turns) as raw conversation history
 - Compresses older messages into rollup memory when the limit is exceeded
 - Includes rollup memory as context in every request
@@ -1218,12 +1272,14 @@ When `session_id` is provided, the backend automatically:
 ⚠️ **Critical:** The `messages` array **cannot be empty**. If you send an empty array `[]`, the backend will return an error: `"'messages' array cannot be empty."`
 
 **For new chats, you have two options:**
+
 1. **Use single-turn mode:** Send `{"prompt": "your prompt", "session_id": "chat_id"}` (recommended for first message)
 2. **Use messages format:** Send `{"messages": [{"role": "user", "content": "your prompt"}], "session_id": "chat_id"}` (must have at least 1 message)
 
 **Message Format:**
 
 Each message in the `messages` array must have:
+
 - `role`: Either `"user"` or `"assistant"`
 - `content`: The message text (string)
 
@@ -1284,13 +1340,13 @@ let conversationHistory = [];
 async function askQuestion(prompt) {
   // Add user message to history
   conversationHistory.push({ role: "user", content: prompt });
-  
+
   const response = await fetch("http://localhost:5000/groq/general-llm", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages: conversationHistory,
-      session_id: sessionId
+      session_id: sessionId,
     }),
   });
 
@@ -1371,11 +1427,13 @@ All three chat endpoints (`/rag/chat`, `/rag/deck-chat`, `/groq/general-llm`) su
 ### How It Works
 
 **Fixed Window + Rollup Strategy:**
+
 - **Raw Messages Window:** The backend keeps the last **30 messages** (15 turns) in raw format
 - **Rollup Memory:** Messages older than 30 are compressed into a single rollup memory string
 - **Automatic Management:** When the limit is exceeded, the oldest messages are automatically rolled up
 
 **Message Flow:**
+
 1. Frontend sends full conversation history in `messages` array (stateless pattern)
 2. Backend syncs session with the provided messages
 3. If messages > 30: oldest messages are rolled up, last 30 kept as raw
@@ -1387,21 +1445,25 @@ All three chat endpoints (`/rag/chat`, `/rag/deck-chat`, `/groq/general-llm`) su
 #### Scenario 1: New Chat (First Message)
 
 **Frontend sends:**
+
 ```json
 {
   "question": "What is an op-amp?",
   "session_id": "chat_123"
 }
 ```
+
 OR
+
 ```json
 {
-  "messages": [{"role": "user", "content": "What is an op-amp?"}],
+  "messages": [{ "role": "user", "content": "What is an op-amp?" }],
   "session_id": "chat_123"
 }
 ```
 
 **Backend behavior:**
+
 - Creates new session: `session.messages = []`, `rollup_memory = None`
 - Stores user message: `session.messages = [user_msg]`
 - No rollup needed (1 message < 30)
@@ -1415,20 +1477,22 @@ OR
 #### Scenario 2: Old Chat - 13th Message
 
 **Frontend sends:**
+
 ```json
 {
   "messages": [
     // 12 previous messages (6 turns)
-    {"role": "user", "content": "..."},
-    {"role": "assistant", "content": "..."},
+    { "role": "user", "content": "..." },
+    { "role": "assistant", "content": "..." },
     // ... 10 more messages
-    {"role": "user", "content": "New question"}  // 13th message
+    { "role": "user", "content": "New question" } // 13th message
   ],
   "session_id": "chat_123"
 }
 ```
 
 **Backend behavior:**
+
 - Retrieves existing session (may have previous messages + rollup)
 - Filters system messages: 13 conversation messages
 - Checks: `13 > 30?` → **No**, no rollup needed
@@ -1441,18 +1505,20 @@ OR
 #### Scenario 3: Old Chat - 32nd Message
 
 **Frontend sends:**
+
 ```json
 {
   "messages": [
     // 30 previous messages (15 turns)
     // ... 30 messages ...
-    {"role": "user", "content": "New question"}  // 31st message
+    { "role": "user", "content": "New question" } // 31st message
   ],
   "session_id": "chat_123"
 }
 ```
 
 **Backend behavior:**
+
 - Retrieves existing session
 - Filters system messages: 31 conversation messages
 - Checks: `31 > 30?` → **Yes**, rollup triggered
@@ -1472,26 +1538,29 @@ OR
 #### Scenario 4: After Browser Restart / Server Restart
 
 **Frontend sends:**
+
 ```json
 {
   "messages": [
     // 10 messages loaded from database
     // ... 10 messages ...
-    {"role": "user", "content": "New question"}  // 11th message
+    { "role": "user", "content": "New question" } // 11th message
   ],
-  "session_id": "chat_123"  // Same chat ID
+  "session_id": "chat_123" // Same chat ID
 }
 ```
 
 **Backend behavior:**
 
 **Case A: Server Still Running (Session in Memory)**
+
 - Finds existing session in memory
 - May have rollup memory from previous conversation
 - Processes all 11 messages as in Scenario 2
 - Works seamlessly
 
 **Case B: Server Restarted (Session Lost)**
+
 - Session not found → Creates new session: `session.messages = []`, `rollup_memory = None`
 - Since frontend sends full history, session syncs: `session.messages = [all 11 messages]`
 - No rollup needed (11 < 30)
@@ -1505,17 +1574,20 @@ OR
 ### Rollup Memory Details
 
 **When Rollup Happens:**
+
 - Triggered when `len(conversation_messages) > 30`
 - Only the overflow messages are rolled up: `overflow_count = total_messages - 30`
 - Example: 35 messages → first 5 messages rolled up, last 30 kept raw
 
 **Rollup Generation:**
+
 - Takes existing `rollup_memory` (if any) + overflow messages
 - Sends to LLM with rollup prompt to generate compressed memory
 - New rollup replaces old rollup (accumulates context)
 - Format: Structured memory block with Summary, Decisions, Constraints, Open Loops, References
 
 **Rollup in LLM Context:**
+
 - Rollup memory is included as a synthetic user message: `[Previous conversation context]\n{rollup_memory}`
 - Appears before the raw messages in the LLM prompt
 - Allows LLM to maintain context from older conversations
@@ -1525,11 +1597,13 @@ OR
 ### Session Persistence
 
 **Current Implementation:**
+
 - **In-Memory Only:** Sessions are stored in server memory
 - **Lost on Restart:** If the server restarts, all sessions are lost
 - **Recovery:** Frontend sending full history allows session recovery, but rollup memory is regenerated
 
 **Best Practices:**
+
 1. **Frontend should always send full conversation history** from database
 2. **Use consistent `session_id`** (e.g., database chat ID)
 3. **Don't rely on backend session persistence** - treat backend as stateless
@@ -1544,28 +1618,29 @@ OR
 ```javascript
 // 1. New Chat
 const newChat = {
-  question: "First question",  // Use question field for first message
-  session_id: chatId
+  question: "First question", // Use question field for first message
+  session_id: chatId,
 };
 
 // 2. Subsequent Messages
 const existingChat = {
   messages: [
-    ...conversationHistoryFromDB,  // Load from your database
-    { role: "user", content: "New question" }  // Add current message
+    ...conversationHistoryFromDB, // Load from your database
+    { role: "user", content: "New question" }, // Add current message
   ],
-  session_id: chatId  // Same chat ID from database
+  session_id: chatId, // Same chat ID from database
 };
 
 // 3. After Browser Restart
 // Load conversationHistory from database, then send as above
 const restoredChat = {
-  messages: conversationHistoryFromDB,  // Full history from DB
-  session_id: chatId  // Same chat ID
+  messages: conversationHistoryFromDB, // Full history from DB
+  session_id: chatId, // Same chat ID
 };
 ```
 
 **Error Handling:**
+
 - If you send empty `messages: []`, backend returns 400 error
 - Always include at least 1 message, or use `question` field for first message
 - System messages (`role: "system"`) are automatically filtered
@@ -1574,15 +1649,16 @@ const restoredChat = {
 
 ### Summary Table
 
-| Scenario | Messages Sent | Backend Action | Rollup? | LLM Context |
-|----------|--------------|----------------|---------|-------------|
-| New Chat | `question` or `[1 msg]` | Create session, store 1 msg | No | System + 1 msg |
-| 13th Message | `[13 msgs]` | Sync session, store all 13 | No | System + (rollup?) + 13 msgs |
-| 32nd Message | `[31 msgs]` | Rollup 1, keep 30 | Yes | System + rollup + 30 msgs |
-| After Restart (server running) | `[N msgs]` | Use existing session | Depends | System + rollup + last 30 |
-| After Restart (server restarted) | `[N msgs]` | Create new session | Depends | System + (new rollup?) + last 30 |
+| Scenario                         | Messages Sent           | Backend Action              | Rollup? | LLM Context                      |
+| -------------------------------- | ----------------------- | --------------------------- | ------- | -------------------------------- |
+| New Chat                         | `question` or `[1 msg]` | Create session, store 1 msg | No      | System + 1 msg                   |
+| 13th Message                     | `[13 msgs]`             | Sync session, store all 13  | No      | System + (rollup?) + 13 msgs     |
+| 32nd Message                     | `[31 msgs]`             | Rollup 1, keep 30           | Yes     | System + rollup + 30 msgs        |
+| After Restart (server running)   | `[N msgs]`              | Use existing session        | Depends | System + rollup + last 30        |
+| After Restart (server restarted) | `[N msgs]`              | Create new session          | Depends | System + (new rollup?) + last 30 |
 
 **Key Takeaways:**
+
 - Backend maintains last 30 messages in raw format
 - Older messages compressed into rollup memory
 - Frontend should send full history each time (stateless pattern)
@@ -1595,19 +1671,18 @@ const restoredChat = {
 
 ### Workflow 1: Ingest Regular PDF Documents
 
-First, place your PDF files in the `./data` directory, then ingest them:
+Upload a PDF file to ingest it into the system:
 
 ```bash
 curl -X POST http://localhost:5000/rag/ingest \
-     -H "Content-Type: application/json" \
-     -d '{"data_dir":"./data"}'
+     -F "file=@document.pdf"
 ```
 
 **Expected Output:**
 
-- Console logs: "Processing file {filename}" for each file
-- Console logs: "Indexed {filename}: X pages → Y chunks" for each successfully processed file
-- JSON response with ingestion summary
+- Console logs: "Processing file {filename}"
+- Console logs: "Indexed {filename}: X pages → Y chunks"
+- JSON response with ingestion summary including file name, pages, and chunks
 
 ### Workflow 2: Ingest Slide Decks and Query
 
@@ -1706,6 +1781,7 @@ This improves recall, especially for domain-specific terminology or when questio
 The system automatically reformulates contextual questions using conversation history:
 
 **Examples:**
+
 - `"What was my previous question?"` → Reformulated to the actual previous question
 - `"Which is better?"` → Reformulated using what was being compared in the conversation
 - `"Repeat that"` → Reformulated to the original question being asked
@@ -1717,6 +1793,7 @@ This works automatically - just include conversation history via `messages` arra
 For coding questions, the system automatically decomposes them into learning-focused sub-queries:
 
 **Example:**
+
 ```
 Input: "Write I2C code for PIC18 temperature sensor"
 
@@ -1750,16 +1827,19 @@ The system automatically detects question types and applies appropriate retrieva
 For slide queries, the system uses direct metadata lookup instead of semantic search:
 
 **Supported Formats:**
+
 - Single slides: `"slide 17"`, `"#17"`, `"slide number 17"`
 - Ranges: `"slides 1-10"`, `"slides 1 to 10"`, `"slides 1 through 10"`
 
 **Examples:**
+
 ```json
 {
   "question": "Explain slide 17",
   "deck_ids": ["deck_abc123"]
 }
 ```
+
 → Directly retrieves slide 17 (not semantic search)
 
 ```json
@@ -1768,9 +1848,11 @@ For slide queries, the system uses direct metadata lookup instead of semantic se
   "deck_ids": ["deck_abc123"]
 }
 ```
+
 → Directly retrieves slides 1 through 10
 
 **Benefits:**
+
 - Precise results (no wrong slides returned)
 - Faster retrieval (direct lookup vs semantic search)
 - Works in both `/rag/chat` and `/rag/deck-chat`
@@ -1995,16 +2077,16 @@ All example responses in this document were taken directly from actual test runs
 
 ## Summary of Endpoints
 
-| Endpoint             | Method | Purpose                      | Input                                             | Output                     | Response Type |
-| -------------------- | ------ | ---------------------------- | ------------------------------------------------- | -------------------------- | ------------- |
-| `/health`            | GET    | Health check                 | None                                              | "OK"                       | Plain text    |
-| `/rag/ingest`        | POST   | Ingest PDFs from directory   | `data_dir` (optional)                             | Ingestion summary          | JSON          |
-| `/rag/chat`          | POST   | RAG-powered Q&A (with intelligent enhancements) | `question`, `messages`, `session_id`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
+| Endpoint             | Method | Purpose                                                       | Input                                                                            | Output                     | Response Type |
+| -------------------- | ------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------- | ------------- |
+| `/health`            | GET    | Health check                                                  | None                                                                             | "OK"                       | Plain text    |
+| `/rag/ingest`        | POST   | Ingest PDFs from directory                                    | `data_dir` (optional)                                                            | Ingestion summary          | JSON          |
+| `/rag/chat`          | POST   | RAG-powered Q&A (with intelligent enhancements)               | `question`, `messages`, `session_id`, `top_k`, `use_query_expansion`             | Streaming answer + sources | SSE stream    |
 | `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered, with intelligent enhancements) | `question`, `messages`, `session_id`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
-| `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX) | `file`, `file_type`, `deck_id` (optional)         | `deck_id` + stats          | JSON          |
-| `/rag/generate-quiz` | POST   | Generate quiz from slides    | `deck_ids`, `question_counts`, `quiz_description` | Quiz questions (DB-ready)  | JSON          |
-| `/autograde/grade`   | POST   | Auto-grade submission        | See Auto-Grade section below                      | `grade` + `feedback`       | JSON          |
-| `/groq/general-llm`  | POST   | Direct LLM query (no RAG)    | `prompt`                                          | Streaming LLM response     | SSE stream    |
+| `/rag/ingest-slides` | POST   | Ingest slide deck (PDF/PPTX)                                  | `file`, `file_type`, `deck_id` (optional)                                        | `deck_id` + stats          | JSON          |
+| `/rag/generate-quiz` | POST   | Generate quiz from slides                                     | `deck_ids`, `question_counts`, `quiz_description`                                | Quiz questions (DB-ready)  | JSON          |
+| `/autograde/grade`   | POST   | Auto-grade submission                                         | See Auto-Grade section below                                                     | `grade` + `feedback`       | JSON          |
+| `/groq/general-llm`  | POST   | Direct LLM query (no RAG)                                     | `prompt`                                                                         | Streaming LLM response     | SSE stream    |
 
 ---
 

@@ -2,7 +2,7 @@
 from flask import Blueprint, request, jsonify, Response
 import json
 
-from rag.ingest import ingest_directory
+from rag.ingest import ingest_directory, ingest_pdf_file
 from rag.retrieval import (
     retrieve_context, 
     generate_answer, 
@@ -25,21 +25,38 @@ from config import GROQ_MODEL
 rag_bp = Blueprint("rag", __name__)
 
 
-# Ingests PDFs from data directory into ChromaDB
-# Processes all PDFs, extracts text, chunks it, and stores with metadata
-# This one processes all the PDFs in the data directory
+# Ingests a single PDF file into ChromaDB
+# Accepts file upload via multipart/form-data
+# Processes the PDF, extracts text, chunks it, and stores with metadata
 @rag_bp.route("/ingest", methods=["POST"])
 def ingest():
-    # 1. Parse request body for optional data_dir parameter
-    body = request.get_json(silent=True) or {}
-    data_dir = body.get("data_dir", "./data")
-    # 2. Call ingestion pipeline and return summary
     try:
-        summary = ingest_directory(data_dir=data_dir)
-        return jsonify({
-            "status": "ok",
-            "summary": summary
-        }), 200
+        # 1. Check if file is provided
+        if 'file' not in request.files:
+            return jsonify({
+                "status": "error",
+                "error": "No file provided. Use 'file' field in multipart/form-data."
+            }), 400
+        
+        file = request.files['file']
+        
+        # 2. Validate file is present and is a PDF
+        if file.filename == '':
+            return jsonify({
+                "status": "error",
+                "error": "No file selected."
+            }), 400
+        
+        if not file.filename.lower().endswith('.pdf'):
+            return jsonify({
+                "status": "error",
+                "error": "Only PDF files are supported."
+            }), 400
+        
+        # 3. Call ingestion pipeline with file stream
+        summary = ingest_pdf_file(file.stream, file.filename)
+        return jsonify(summary), 200
+        
     except Exception as e:
         return jsonify({
             "status": "error",

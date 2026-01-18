@@ -3,6 +3,7 @@ from pypdf._page import PageObject
 
 
 import os
+import io
 from typing import List, Tuple, Dict
 from pypdf import PdfReader
 import chromadb
@@ -16,9 +17,10 @@ from .embeddings import LocalEmbeddingFunction
 
 # Extracts raw text from PDF files while preserving page numbers
 # Needed to track source pages for citations later
-def extract_pdf_text(file_path: str) -> List[Tuple[int, str]]:
-    # 1. Read PDF file
-    reader = PdfReader(file_path)
+# Supports both file path and file-like object (for uploads)
+def extract_pdf_text(file_path_or_stream, filename: str = None) -> List[Tuple[int, str]]:
+    # 1. Read PDF file (handle both path strings and file-like objects)
+    reader = PdfReader(file_path_or_stream)
     pages = []
     # 2. Extract text from each page, track page numbers
     for i, page in enumerate[PageObject](reader.pages, start=1):
@@ -128,4 +130,60 @@ def ingest_directory(data_dir: str = "./data") -> Dict:
         "files_indexed": files_indexed,
         "total_chunks": total_chunks,
         "count_in_collection": collection.count(),
+    }
+
+
+# Ingests a single PDF file (from upload) into ChromaDB
+# Similar flow to ingest_directory but for a single file upload
+def ingest_pdf_file(file_stream, filename: str) -> Dict:
+    # 1. Initialize ChromaDB client with persistent storage
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    # 2. Get or create collection with local embedding function
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        embedding_function=LocalEmbeddingFunction(),
+    )
+
+    print(f"Processing file {filename}")
+    # 3. Extract text from PDF
+    pages = extract_pdf_text(file_stream, filename)
+    if not pages:
+        raise ValueError(f"No text extracted from {filename}")
+    
+    # 4. Chunk the extracted text
+    chunks = chunck_pages(pages)
+    if not chunks:
+        raise ValueError(f"No chunks created from {filename}")
+
+    # 5. Prepare data structures for ChromaDB upsert
+    ids, docs, metas = [], [], []
+    for i, c in enumerate(chunks):
+        # 6. Create unique ID, store text and metadata
+        ids.append(f"{filename}::p{c['page']}::c{i}")
+        docs.append(c["text"])
+        metas.append({
+            "source": filename,
+            "page": c["page"]
+        })
+
+    # 7. Upsert to ChromaDB
+    collection.upsert(ids=ids, documents=docs, metadatas=metas)
+    print(f"Indexed {filename}: {len(pages)} pages → {len(ids)} chunks")
+
+    # 8. Return ingestion summary
+    return {
+        "status": "ok",
+        "summary": {
+            "collection": COLLECTION_NAME,
+            "storage_path": CHROMA_PATH,
+            "files_indexed": [
+                {
+                    "file": filename,
+                    "pages": len(pages),
+                    "chunks": len(ids)
+                }
+            ],
+            "total_chunks": len(ids),
+            "count_in_collection": collection.count(),
+        }
     }
