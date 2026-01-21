@@ -495,10 +495,19 @@ def generate_quiz():
                 "error": f"No relevant content found for deck_ids: {deck_ids}"
             }), 404
         
-        # 5. Format retrieved contexts into content string for LLM
+        # FIX - I got 413 on some slides, due to window chunks being too large [and it would fetch them with individual slides as well] 
+        # NEW STEP - 5. Filter out window chunks - only use single slide chunks for quiz generation
+        slide_only_ctx = [c for c in ctx if c.get("chunk_type") == "slide"]
+        
+        if not slide_only_ctx:
+            return jsonify({
+                "error": f"No slide chunks found for deck_ids: {deck_ids}. Only window chunks available."
+            }), 404
+        
+        # 6. Format retrieved contexts into content string for LLM
         # Build context similar to how build_slides_context works
         all_content_parts = []
-        for c in ctx:
+        for c in slide_only_ctx:
             text = (c.get("text") or "").strip()
             if text:
                 all_content_parts.append(text)
@@ -509,7 +518,7 @@ def generate_quiz():
                 "error": f"No content retrieved for deck_ids: {deck_ids}"
             }), 404
         
-        # 6. Build quiz generation prompt
+        # 7. Build quiz generation prompt
         quiz_prompt = build_quiz_generation_prompt(
             all_content=all_content,
             requested_counts=requested_counts,
@@ -598,7 +607,7 @@ def generate_quiz():
         # 12. Return quiz in database-ready format
         return jsonify({
             "deck_ids": deck_ids,
-            "contexts_retrieved": len(ctx),
+            "contexts_retrieved": len(slide_only_ctx), 
             "question_count": len(formatted_questions),
             "question_type": response_question_type,
             "question_counts": requested_counts,
