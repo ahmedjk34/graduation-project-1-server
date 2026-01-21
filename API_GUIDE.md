@@ -6,7 +6,14 @@
 
 ## Overview
 
-This API provides endpoints for ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB) and performing Retrieval-Augmented Generation (RAG) queries against the ingested content. The system uses local embeddings with sentence-transformers and Groq API for LLM generation. It also supports quiz generation from slide decks.
+This API provides endpoints for:
+1. **Circuit Simulation**: Simulating electronic circuits using PySpice (NGSpice backend) with intelligent resistor-to-node current mapping
+2. **Document Ingestion**: Ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB)
+3. **RAG Queries**: Performing Retrieval-Augmented Generation (RAG) queries against ingested content
+4. **Quiz Generation**: Generating quizzes from slide decks
+5. **Auto-Grading**: Automated grading of student submissions
+
+The system uses local embeddings with sentence-transformers and Groq API for LLM generation. Circuit simulation uses PySpice with NGSpice as the SPICE simulator backend.
 
 **RAG Enhancements:** The system includes several intelligent enhancements:
 
@@ -49,7 +56,268 @@ OK
 
 ---
 
-### 2. Ingest PDFs
+### 2. Circuit Simulation
+
+**Endpoint:** `POST /circuit/simulate`
+
+**Description:** Simulates an electronic circuit using PySpice (NGSpice backend) and returns node voltages, branch currents, and resistor-specific current mappings with node information. The system performs DC operating point analysis to calculate steady-state voltages and currents throughout the circuit.
+
+**Smart Features:**
+
+- **Intelligent Resistor-to-Node Mapping**: The system automatically maps resistor currents to their corresponding nodes using a clever pattern recognition approach discovered through extensive testing. PySpice generates branch names in a predictable format: `vr{resistor_name_lowercase}_plus` (e.g., resistor "R1" generates branch "vr1_plus"). This pattern was verified across many combinations and remains consistent. The system uses this pattern to automatically correlate simulation results with the original circuit topology, eliminating the need for manual mapping. Since the frontend already determines arbitrary node assignments and resistor names, this mapping algorithm bridges the gap between PySpice's internal naming and the user-defined circuit structure.
+- **Automatic Model Management**: Component models (diodes, transistors) are automatically added to the circuit only once, even if multiple components use the same model. This optimization uses a hashmap-based tracking system (`added_models` set) to prevent duplicate model definitions in the SPICE netlist.
+- **Ground Node Handling**: Node `0` is automatically converted to ground (`gnd`) in the SPICE netlist, following standard SPICE conventions. The system includes a helper function that transparently handles this conversion throughout circuit construction.
+- **Current Probe Integration**: Current probes are automatically added to resistor components during circuit creation (`resistor.plus.add_current_probe(circuit)`), enabling current measurement through branches without manual configuration.
+
+**Request Body:**
+
+The request must be a JSON object with a `circuit` field containing the circuit definition:
+
+```json
+{
+  "circuit": {
+    "name": "My Circuit",
+    "nodes": [1, 2, 3, 0],
+    "voltage_sources": [
+      {
+        "name": "V1",
+        "from": 1,
+        "to": 0,
+        "voltage": 12
+      },
+      {
+        "name": "V2",
+        "from": 2,
+        "to": 0,
+        "voltage": 5
+      }
+    ],
+    "resistors": [
+      {
+        "name": "R1",
+        "from": 1,
+        "to": 2,
+        "resistance": 1000
+      },
+      {
+        "name": "R2",
+        "from": 2,
+        "to": 3,
+        "resistance": 2200
+      }
+    ],
+    "capacitors": [
+      {
+        "name": "C1",
+        "from": 2,
+        "to": 0,
+        "capacitance": 0.001
+      }
+    ],
+    "diodes": [
+      {
+        "name": "D1",
+        "from": 3,
+        "to": 0,
+        "model": "1N4148"
+      }
+    ],
+    "bjts": [
+      {
+        "name": "Q1",
+        "type": "NPN",
+        "collector": 3,
+        "base": 2,
+        "emitter": 0,
+        "model": "2N2222"
+      }
+    ]
+  }
+}
+```
+
+**Circuit Definition Fields:**
+
+- `name` (required): Name identifier for the circuit
+- `nodes` (required): Array of node numbers used in the circuit. Node `0` is always ground.
+- `voltage_sources` (optional): Array of voltage source objects:
+  - `name`: Component name (e.g., "V1", "V2")
+  - `from`: Source node number
+  - `to`: Destination node number (typically 0 for ground)
+  - `voltage`: Voltage value in Volts (numeric, no unit suffix needed)
+- `resistors` (optional): Array of resistor objects:
+  - `name`: Component name (e.g., "R1", "R2", "R1312312" - any name is valid)
+  - `from`: First terminal node number
+  - `to`: Second terminal node number
+  - `resistance`: Resistance value in Ohms (numeric, no unit suffix needed)
+- `capacitors` (optional): Array of capacitor objects:
+  - `name`: Component name (e.g., "C1")
+  - `from`: First terminal node number
+  - `to`: Second terminal node number
+  - `capacitance`: Capacitance value in Farads (numeric, e.g., 0.001 for 1mF)
+- `diodes` (optional): Array of diode objects:
+  - `name`: Component name (e.g., "D1")
+  - `from`: Anode node number
+  - `to`: Cathode node number
+  - `model`: Diode model name (must be available in the system, e.g., "1N4148")
+- `bjts` (optional): Array of bipolar junction transistor objects:
+  - `name`: Component name (e.g., "Q1")
+  - `type`: Transistor type ("NPN" or "PNP")
+  - `collector`: Collector node number
+  - `base`: Base node number
+  - `emitter`: Emitter node number
+  - `model`: Transistor model name (must be available in the system, e.g., "2N2222")
+
+**Available Component Models:**
+
+**Diodes:**
+- `1N4148`: Standard switching diode with parameters: IS=4.325nA, RS=0.6458Ω, BV=100V, IBV=0.0001V, N=1.906
+
+**Transistors:**
+- `2N2222` (NPN): General-purpose NPN transistor with comprehensive SPICE parameters including forward/reverse beta, capacitances, and timing parameters
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "node_voltages": {
+    "1": 12.0,
+    "2": 5.0,
+    "3": 0.10235617194247401,
+    "rr1_plus": 12.0,
+    "rr2_plus": 5.0
+  },
+  "node_currents": {
+    "R1": {
+      "current": 0.007,
+      "from_node": 1,
+      "to_node": 2
+    },
+    "R2": {
+      "current": 0.002226201740026148,
+      "from_node": 2,
+      "to_node": 3
+    }
+  },
+  "time": null,
+  "frequency": null
+}
+```
+
+**Response Fields:**
+
+- `status`: Always "ok" for successful simulations
+- `node_voltages`: Dictionary mapping node identifiers to voltage values (in Volts)
+  - Integer keys (e.g., "1", "2", "3") represent actual circuit nodes
+  - String keys with "_plus" suffix (e.g., "rr1_plus") represent component terminal voltages
+- `node_currents`: Dictionary mapping resistor names to current information objects:
+  - `current`: Current value in Amperes (positive or negative depending on direction)
+  - `from_node`: Source node number for the resistor
+  - `to_node`: Destination node number for the resistor
+- `time`: Time array (for transient analysis) or `null` for DC analysis
+- `frequency`: Frequency array (for AC analysis) or `null` for DC analysis
+
+**cURL Example:**
+
+```bash
+curl -X POST http://localhost:5000/circuit/simulate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "circuit": {
+      "name": "Test Circuit",
+      "nodes": [1, 2, 0],
+      "voltage_sources": [
+        {
+          "name": "V1",
+          "from": 1,
+          "to": 0,
+          "voltage": 12
+        }
+      ],
+      "resistors": [
+        {
+          "name": "R1",
+          "from": 1,
+          "to": 2,
+          "resistance": 1000
+        }
+      ]
+    }
+  }'
+```
+
+**Postman Example:**
+
+1. **Method:** `POST`
+2. **URL:** `http://localhost:5000/circuit/simulate`
+3. **Headers:**
+   - `Content-Type: application/json`
+4. **Body:**
+   - Select `raw`
+   - Choose `JSON` format
+   - Paste the circuit JSON structure
+
+**Error Responses:**
+
+Missing circuit (400):
+
+```json
+{
+  "error": "Circuit is required."
+}
+```
+
+Invalid JSON (400):
+
+```json
+{
+  "error": "Request must be JSON."
+}
+```
+
+Simulation error (500):
+
+The server will return a 500 error with detailed error information in the response body if the circuit simulation fails (e.g., invalid component values, convergence issues, etc.).
+
+**Technical Notes:**
+
+1. **Resistor Current Mapping Algorithm** (Key Innovation): The system uses a smart pattern-matching approach discovered through extensive testing:
+   - **Discovery Process**: Through testing many combinations, it was found that PySpice consistently generates branch names in the format: `vr{resistor_name_lowercase}_plus`
+   - **Pattern Examples**: 
+     - Resistor "R1" → branch name "vr1_plus"
+     - Resistor "R1312312" → branch name "vr1312312_plus"
+     - The pattern is always consistent regardless of resistor name complexity
+   - **Mapping Process**: The system extracts the resistor name from the branch name by removing the "vr" prefix and "_plus" suffix, then matches it with the original circuit definition
+   - **Node Correlation**: Since the frontend determines arbitrary node assignments and resistor names, this algorithm bridges PySpice's internal naming with user-defined topology
+   - **Result Structure**: Each resistor gets mapped to an object containing `current`, `from_node`, and `to_node`, providing complete context for current flow analysis
+   - This innovation eliminates the need for manual mapping tables and enables automatic correlation of simulation results with circuit topology
+
+2. **Operating Point Analysis**: The endpoint performs DC operating point analysis, which calculates:
+   - Steady-state node voltages
+   - Branch currents through components with current probes
+   - This is ideal for analyzing DC circuits, bias points, and static behavior
+
+3. **WaveForm Handling**: The system uses `.items()` instead of `.values()` when iterating over `analysis.branches` to avoid the `TypeError: unhashable type: 'WaveForm'` error. This was discovered through experimentation when the tutorial's suggested approach (`analysis.branches.values()`) failed. The solution uses branch names (strings) as dictionary keys instead of WaveForm objects, which are not hashable.
+
+3. **Model Optimization**: Component models are tracked using a hashmap (`added_models` set) to ensure each model is only added once to the SPICE netlist, even if multiple components share the same model. This prevents SPICE errors from duplicate model definitions.
+
+4. **Platform-Specific Simulator**: On Linux systems, the endpoint uses `ngspice-shared` as the SPICE simulator backend. The simulator is automatically configured based on the platform.
+
+5. **Current Direction**: Current values can be positive or negative depending on the actual current direction through the component relative to the `from_node` → `to_node` direction.
+
+6. **Node 0 Convention**: Following SPICE standards, node `0` is always treated as ground. The system automatically converts node `0` references to `gnd` in the generated netlist.
+
+**Limitations:**
+
+- Currently supports DC operating point analysis only (no transient or AC analysis)
+- Component models must be predefined in the system (`data.py`)
+- Large circuits may experience longer simulation times
+- Convergence issues may occur with certain circuit topologies (standard SPICE limitation)
+
+---
+
+### 3. Ingest PDFs
 
 **Endpoint:** `POST /rag/ingest`
 
@@ -2080,6 +2348,7 @@ All example responses in this document were taken directly from actual test runs
 | Endpoint             | Method | Purpose                                                       | Input                                                                            | Output                     | Response Type |
 | -------------------- | ------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------- | ------------- |
 | `/health`            | GET    | Health check                                                  | None                                                                             | "OK"                       | Plain text    |
+| `/circuit/simulate`  | POST   | Simulate electronic circuit (DC operating point)              | `circuit` (JSON with components, nodes, voltage sources, etc.)                    | Node voltages, currents    | JSON          |
 | `/rag/ingest`        | POST   | Ingest PDFs from directory                                    | `data_dir` (optional)                                                            | Ingestion summary          | JSON          |
 | `/rag/chat`          | POST   | RAG-powered Q&A (with intelligent enhancements)               | `question`, `messages`, `session_id`, `top_k`, `use_query_expansion`             | Streaming answer + sources | SSE stream    |
 | `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered, with intelligent enhancements) | `question`, `messages`, `session_id`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
