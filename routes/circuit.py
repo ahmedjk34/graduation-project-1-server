@@ -156,8 +156,11 @@ def dc_sweep():
     if not vinput_source:
         return jsonify({"error": f"Vinput.component '{component_name}' must exist in circuit voltage_sources."}), 400
     
-    # Validate that node_to_track is not the same as Vinput.from_node
+    # Get voltage source nodes
     vinput_from_node = vinput_source.get("from")
+    vinput_to_node = vinput_source.get("to")
+    
+    # Validate that node_to_track is not the same as Vinput.from_node
     if node_to_track == vinput_from_node:
         return jsonify({"error": "node_to_track cannot be the same as Vinput.from_node."}), 400
     
@@ -171,8 +174,13 @@ def dc_sweep():
         
         analysis = dc_sweep_analysis(circuit, component_name, initial_voltage, final_voltage, step)
         
-        # Create plot (use vinput_from_node for x-axis since analysis keys are node numbers)
-        fig = plot_dc_sweep(analysis, vinput_from_node, node_to_track)
+        # ISSUE FIX: (DC sweep error: 0) 
+        # This is because ground (node 0) is not accessible in analysis results (index error)
+        # For x-axis: use "to" node if "from" is ground (0), otherwise use "from" node
+        x_axis_node = vinput_to_node if vinput_from_node == 0 else vinput_from_node
+        
+        # Create plot
+        fig = plot_dc_sweep(analysis, x_axis_node, node_to_track)
         
         # Convert to base64
         plot_base64 = plot_to_base64(fig)
