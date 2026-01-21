@@ -14,6 +14,7 @@
 
 [https://www.youtube.com/watch?v=62BOYx1UCfs] used this youtube series, combined with some random articles online docs on this are pretty bad, some useful examples here though: [https://pyspice.fabrice-salvaire.fr/releases/v1.5/examples/index.html]
 
+[https://www.youtube.com/watch?v=472qQi09rbg] different yt video, this is for node currents (inspo)
 ---
 
 ## Upgrading RAG stuff

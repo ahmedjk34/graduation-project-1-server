@@ -6,7 +6,14 @@
 
 ## Overview
 
-This API provides endpoints for ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB) and performing Retrieval-Augmented Generation (RAG) queries against the ingested content. The system uses local embeddings with sentence-transformers and Groq API for LLM generation. It also supports quiz generation from slide decks.
+This API provides endpoints for:
+1. **Circuit Simulation**: Simulating electronic circuits using PySpice (NGSpice backend) with intelligent resistor-to-node current mapping, including DC operating point analysis, DC sweep analysis, transient time-domain analysis, and AC frequency sweep analysis with plot generation
+2. **Document Ingestion**: Ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB)
+3. **RAG Queries**: Performing Retrieval-Augmented Generation (RAG) queries against ingested content
+4. **Quiz Generation**: Generating quizzes from slide decks
+5. **Auto-Grading**: Automated grading of student submissions
+
+The system uses local embeddings with sentence-transformers and Groq API for LLM generation. Circuit simulation uses PySpice with NGSpice as the SPICE simulator backend.
 
 **RAG Enhancements:** The system includes several intelligent enhancements:
 
@@ -49,7 +56,1147 @@ OK
 
 ---
 
-### 2. Ingest PDFs
+### 2. Circuit Simulation
+
+**Endpoint:** `POST /circuit/simulate`
+
+**Description:** Simulates an electronic circuit using PySpice (NGSpice backend) and returns node voltages, branch currents, and resistor-specific current mappings with node information. The system performs DC operating point analysis to calculate steady-state voltages and currents throughout the circuit.
+
+**Smart Features:**
+
+- **Intelligent Resistor-to-Node Mapping**: The system automatically maps resistor currents to their corresponding nodes using a clever pattern recognition approach discovered through extensive testing. PySpice generates branch names in a predictable format: `vr{resistor_name_lowercase}_plus` (e.g., resistor "R1" generates branch "vr1_plus"). This pattern was verified across many combinations and remains consistent. The system uses this pattern to automatically correlate simulation results with the original circuit topology, eliminating the need for manual mapping. Since the frontend already determines arbitrary node assignments and resistor names, this mapping algorithm bridges the gap between PySpice's internal naming and the user-defined circuit structure.
+- **Automatic Model Management**: Component models (diodes, transistors) are automatically added to the circuit only once, even if multiple components use the same model. This optimization uses a hashmap-based tracking system (`added_models` set) to prevent duplicate model definitions in the SPICE netlist.
+- **Ground Node Handling**: Node `0` is automatically converted to ground (`gnd`) in the SPICE netlist, following standard SPICE conventions. The system includes a helper function that transparently handles this conversion throughout circuit construction.
+- **Current Probe Integration**: Current probes are automatically added to resistor components during circuit creation (`resistor.plus.add_current_probe(circuit)`), enabling current measurement through branches without manual configuration.
+
+**Request Body:**
+
+The request must be a JSON object with a `circuit` field containing the circuit definition:
+
+```json
+{
+  "circuit": {
+    "name": "My Circuit",
+    "nodes": [1, 2, 3, 0],
+    "dc_voltage_sources": [
+      {
+        "name": "V1",
+        "from": 1,
+        "to": 0,
+        "voltage": 12
+      },
+      {
+        "name": "V2",
+        "from": 2,
+        "to": 0,
+        "voltage": 5
+      }
+    ],
+    "ac_voltage_sources": [
+      {
+        "name": "Vac1",
+        "from": 3,
+        "to": 0,
+        "amplitude": 5,
+        "frequency": 1000
+      }
+    ],
+    "resistors": [
+      {
+        "name": "R1",
+        "from": 1,
+        "to": 2,
+        "resistance": 1000
+      },
+      {
+        "name": "R2",
+        "from": 2,
+        "to": 3,
+        "resistance": 2200
+      }
+    ],
+    "capacitors": [
+      {
+        "name": "C1",
+        "from": 2,
+        "to": 0,
+        "capacitance": 0.001
+      }
+    ],
+    "diodes": [
+      {
+        "name": "D1",
+        "from": 3,
+        "to": 0,
+        "model": "1N4148"
+      }
+    ],
+    "bjts": [
+      {
+        "name": "Q1",
+        "type": "NPN",
+        "collector": 3,
+        "base": 2,
+        "emitter": 0,
+        "model": "2N2222"
+      }
+    ]
+  }
+}
+```
+
+**Circuit Definition Fields:**
+
+- `name` (required): Name identifier for the circuit
+- `nodes` (required): Array of node numbers used in the circuit. Node `0` is always ground.
+- `dc_voltage_sources` (optional): Array of DC voltage source objects:
+  - `name`: Component name (e.g., "V1", "V2")
+  - `from`: Source node number
+  - `to`: Destination node number (typically 0 for ground)
+  - `voltage`: Voltage value in Volts (numeric, no unit suffix needed)
+- `ac_voltage_sources` (optional): Array of AC voltage source objects:
+  - `name`: Component name (e.g., "Vac1", "Vsin")
+  - `from`: Source node number
+  - `to`: Destination node number (typically 0 for ground)
+  - `amplitude`: Amplitude value in Volts (numeric, no unit suffix needed)
+  - `frequency`: Frequency value in Hertz (numeric, no unit suffix needed)
+- `resistors` (optional): Array of resistor objects:
+  - `name`: Component name (e.g., "R1", "R2", "R1312312" - any name is valid)
+  - `from`: First terminal node number
+  - `to`: Second terminal node number
+  - `resistance`: Resistance value in Ohms (numeric, no unit suffix needed)
+- `capacitors` (optional): Array of capacitor objects:
+  - `name`: Component name (e.g., "C1")
+  - `from`: First terminal node number
+  - `to`: Second terminal node number
+  - `capacitance`: Capacitance value in Farads (numeric, e.g., 0.001 for 1mF)
+- `diodes` (optional): Array of diode objects:
+  - `name`: Component name (e.g., "D1")
+  - `from`: Anode node number
+  - `to`: Cathode node number
+  - `model`: Diode model name (must be available in the system, e.g., "1N4148")
+- `bjts` (optional): Array of bipolar junction transistor objects:
+  - `name`: Component name (e.g., "Q1")
+  - `type`: Transistor type ("NPN" or "PNP")
+  - `collector`: Collector node number
+  - `base`: Base node number
+  - `emitter`: Emitter node number
+  - `model`: Transistor model name (must be available in the system, e.g., "2N2222")
+
+**Available Component Models:**
+
+**Diodes:**
+- `1N4148`: Standard switching diode with parameters: IS=4.325nA, RS=0.6458Ω, BV=100V, IBV=0.0001V, N=1.906
+
+**Transistors:**
+- `2N2222` (NPN): General-purpose NPN transistor with comprehensive SPICE parameters including forward/reverse beta, capacitances, and timing parameters
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "node_voltages": {
+    "1": 12.0,
+    "2": 5.0,
+    "3": 0.10235617194247401,
+    "rr1_plus": 12.0,
+    "rr2_plus": 5.0
+  },
+  "node_currents": {
+    "R1": {
+      "current": 0.007,
+      "from_node": 1,
+      "to_node": 2
+    },
+    "R2": {
+      "current": 0.002226201740026148,
+      "from_node": 2,
+      "to_node": 3
+    }
+  },
+  "time": null,
+  "frequency": null
+}
+```
+
+**Response Fields:**
+
+- `status`: Always "ok" for successful simulations
+- `node_voltages`: Dictionary mapping node identifiers to voltage values (in Volts)
+  - Integer keys (e.g., "1", "2", "3") represent actual circuit nodes
+  - String keys with "_plus" suffix (e.g., "rr1_plus") represent component terminal voltages
+- `node_currents`: Dictionary mapping resistor names to current information objects:
+  - `current`: Current value in Amperes (positive or negative depending on direction)
+  - `from_node`: Source node number for the resistor
+  - `to_node`: Destination node number for the resistor
+- `time`: Time array (for transient analysis) or `null` for DC analysis
+- `frequency`: Frequency array (for AC analysis) or `null` for DC analysis
+
+**cURL Example:**
+
+```bash
+curl -X POST http://localhost:5000/circuit/simulate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "circuit": {
+      "name": "Test Circuit",
+      "nodes": [1, 2, 0],
+      "dc_voltage_sources": [
+        {
+          "name": "V1",
+          "from": 1,
+          "to": 0,
+          "voltage": 12
+        }
+      ],
+      "resistors": [
+        {
+          "name": "R1",
+          "from": 1,
+          "to": 2,
+          "resistance": 1000
+        }
+      ]
+    }
+  }'
+```
+
+**Postman Example:**
+
+1. **Method:** `POST`
+2. **URL:** `http://localhost:5000/circuit/simulate`
+3. **Headers:**
+   - `Content-Type: application/json`
+4. **Body:**
+   - Select `raw`
+   - Choose `JSON` format
+   - Paste the circuit JSON structure
+
+**Error Responses:**
+
+Missing circuit (400):
+
+```json
+{
+  "error": "Circuit is required."
+}
+```
+
+Invalid JSON (400):
+
+```json
+{
+  "error": "Request must be JSON."
+}
+```
+
+Simulation error (500):
+
+The server will return a 500 error with detailed error information in the response body if the circuit simulation fails (e.g., invalid component values, convergence issues, etc.).
+
+**Technical Notes:**
+
+1. **Resistor Current Mapping Algorithm** (Key Innovation): The system uses a smart pattern-matching approach discovered through extensive testing:
+   - **Discovery Process**: Through testing many combinations, it was found that PySpice consistently generates branch names in the format: `vr{resistor_name_lowercase}_plus`
+   - **Pattern Examples**: 
+     - Resistor "R1" → branch name "vr1_plus"
+     - Resistor "R1312312" → branch name "vr1312312_plus"
+     - The pattern is always consistent regardless of resistor name complexity
+   - **Mapping Process**: The system extracts the resistor name from the branch name by removing the "vr" prefix and "_plus" suffix, then matches it with the original circuit definition
+   - **Node Correlation**: Since the frontend determines arbitrary node assignments and resistor names, this algorithm bridges PySpice's internal naming with user-defined topology
+   - **Result Structure**: Each resistor gets mapped to an object containing `current`, `from_node`, and `to_node`, providing complete context for current flow analysis
+   - This innovation eliminates the need for manual mapping tables and enables automatic correlation of simulation results with circuit topology
+
+2. **Operating Point Analysis**: The endpoint performs DC operating point analysis, which calculates:
+   - Steady-state node voltages
+   - Branch currents through components with current probes
+   - This is ideal for analyzing DC circuits, bias points, and static behavior
+
+3. **WaveForm Handling**: The system uses `.items()` instead of `.values()` when iterating over `analysis.branches` to avoid the `TypeError: unhashable type: 'WaveForm'` error. This was discovered through experimentation when the tutorial's suggested approach (`analysis.branches.values()`) failed. The solution uses branch names (strings) as dictionary keys instead of WaveForm objects, which are not hashable.
+
+3. **Model Optimization**: Component models are tracked using a hashmap (`added_models` set) to ensure each model is only added once to the SPICE netlist, even if multiple components share the same model. This prevents SPICE errors from duplicate model definitions.
+
+4. **Platform-Specific Simulator**: On Linux systems, the endpoint uses `ngspice-shared` as the SPICE simulator backend. The simulator is automatically configured based on the platform.
+
+5. **Current Direction**: Current values can be positive or negative depending on the actual current direction through the component relative to the `from_node` → `to_node` direction.
+
+6. **Node 0 Convention**: Following SPICE standards, node `0` is always treated as ground. The system automatically converts node `0` references to `gnd` in the generated netlist.
+
+**Limitations:**
+
+- Currently supports DC operating point analysis only (no transient or AC analysis)
+- Component models must be predefined in the system (`data.py`)
+- Large circuits may experience longer simulation times
+- Convergence issues may occur with certain circuit topologies (standard SPICE limitation)
+
+---
+
+### 3. DC Sweep Analysis
+
+**Endpoint:** `POST /circuit/dc-sweep`
+
+**Description:** Performs DC sweep analysis on an electronic circuit by sweeping a voltage source across a specified range and tracking the voltage response at one or more nodes. Returns a base64-encoded PNG plot showing the input voltage (x-axis) vs tracked node voltages (y-axis). This is useful for analyzing circuit behavior across different input voltage levels, such as transfer characteristics, linearity analysis, and threshold detection.
+
+**Key Features:**
+
+- **Voltage Source Sweeping**: Sweeps any voltage source in the circuit from an initial voltage to a final voltage with a specified step size
+- **Multiple Node Tracking**: Can track and plot multiple nodes simultaneously on the same plot with legend labels
+- **Forward and Backward Sweeps**: Supports both forward sweeps (increasing voltage) and backward sweeps (decreasing voltage) with automatic step sign validation
+- **Comprehensive Validation**: Validates all numeric parameters, sweep direction, step magnitude, and circuit topology
+- **Base64 Plot Response**: Returns plot as base64-encoded PNG for easy embedding in web applications (React/Next.js compatible)
+- **Thread-Safe Plotting**: Uses matplotlib Figure API (non-pyplot) for thread-safe operation in Flask
+
+**Request Body:**
+
+The request must be a JSON object with a `circuit` field (same structure as `/circuit/simulate`), plus `Vinput` and `nodes_to_track` fields:
+
+```json
+{
+  "circuit": {
+    "name": "DC Sweep Circuit",
+    "nodes": [1, 2, 0],
+    "dc_voltage_sources": [
+      {
+        "name": "V1",
+        "from": 1,
+        "to": 0,
+        "voltage": 10
+      }
+    ],
+    "resistors": [
+      {
+        "name": "R1",
+        "from": 1,
+        "to": 2,
+        "resistance": 1000
+      },
+      {
+        "name": "R2",
+        "from": 2,
+        "to": 0,
+        "resistance": 2200
+      }
+    ],
+    "diodes": [
+      {
+        "name": "D1",
+        "from": 2,
+        "to": 0,
+        "model": "1N4148"
+      }
+    ]
+  },
+  "Vinput": {
+    "component": "V1",
+    "initial_voltage": 0,
+    "final_voltage": 10,
+    "step": 0.1
+  },
+  "nodes_to_track": [2]
+}
+```
+
+**Request Fields:**
+
+- `circuit` (required): Circuit definition object (same structure as `/circuit/simulate` endpoint)
+- `Vinput` (required): Voltage source sweep configuration object:
+  - `component` (required): Name of the voltage source to sweep (must exist in `circuit.dc_voltage_sources`)
+  - `initial_voltage` (required): Starting voltage value in Volts (numeric: int or float)
+  - `final_voltage` (required): Ending voltage value in Volts (numeric: int or float)
+  - `step` (required): Voltage step size in Volts (numeric: int or float)
+- `nodes_to_track` (required): Array of node numbers to track and plot on y-axis (must be non-empty array, all nodes must exist in `circuit.nodes`, cannot include ground node 0 or `Vinput.from_node`)
+
+**Sweep Parameter Validation:**
+
+The system performs comprehensive validation of sweep parameters:
+
+1. **Numeric Validation**: All voltage/step values must be numeric (int or float)
+2. **Range Validation**: `initial_voltage` and `final_voltage` cannot be equal (range must be non-zero)
+3. **Forward Sweep** (initial_voltage < final_voltage):
+   - `step` must be positive (> 0)
+   - `step` magnitude cannot exceed the range: `step <= (final_voltage - initial_voltage)`
+4. **Backward Sweep** (initial_voltage > final_voltage):
+   - `step` must be negative (< 0)
+   - `step` magnitude cannot exceed the range: `abs(step) <= (initial_voltage - final_voltage)`
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "plot_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
+}
+```
+
+**Response Fields:**
+
+- `status`: Always "ok" for successful sweeps
+- `plot_base64`: Base64-encoded PNG image string of the DC sweep plot. The plot shows:
+  - **X-axis**: Input Voltage (V) - the voltage at the `from` node of the swept voltage source
+  - **Y-axis**: Voltage (V) - the voltage at the tracked nodes
+- **Multiple lines**: One line per tracked node with legend labels (e.g., "Node 1", "Node 2") when multiple nodes are tracked
+  - **Grid**: Light grid lines for easier reading
+
+**cURL Example:**
+
+```bash
+curl -X POST http://localhost:5000/circuit/dc-sweep \
+  -H "Content-Type: application/json" \
+  -d '{
+    "circuit": {
+      "name": "Diode Sweep",
+      "nodes": [1, 2, 0],
+      "dc_voltage_sources": [
+        {
+          "name": "V1",
+          "from": 1,
+          "to": 0,
+          "voltage": 10
+        }
+      ],
+      "resistors": [
+        {
+          "name": "R1",
+          "from": 1,
+          "to": 2,
+          "resistance": 1000
+        }
+      ],
+      "diodes": [
+        {
+          "name": "D1",
+          "from": 2,
+          "to": 0,
+          "model": "1N4148"
+        }
+      ]
+    },
+    "Vinput": {
+      "component": "V1",
+      "initial_voltage": 0,
+      "final_voltage": 10,
+      "step": 0.1
+    },
+    "nodes_to_track": [2]
+  }'
+  "nodes_to_track": [2]
+}'
+```
+
+**Postman Example:**
+
+1. **Method:** `POST`
+2. **URL:** `http://localhost:5000/circuit/dc-sweep`
+3. **Headers:**
+   - `Content-Type: application/json`
+4. **Body:**
+   - Select `raw`
+   - Choose `JSON` format
+   - Paste the circuit JSON structure with `Vinput` and `nodes_to_track` fields
+
+**JavaScript Example (Displaying Base64 Plot):**
+
+```javascript
+async function performDCSweep(circuitData, vinputConfig, nodeToTrack) {
+  const response = await fetch("http://localhost:5000/circuit/dc-sweep", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      circuit: circuitData,
+      Vinput: vinputConfig,
+      nodes_to_track: nodesToTrack,
+    }),
+  });
+
+  const data = await response.json();
+  
+  if (data.status === "ok") {
+    // Display the plot in an img tag
+    const img = document.createElement("img");
+    img.src = `data:image/png;base64,${data.plot_base64}`;
+    document.getElementById("plot-container").appendChild(img);
+  }
+}
+```
+
+**Error Responses:**
+
+Missing circuit (400):
+
+```json
+{
+  "error": "Circuit is required."
+}
+```
+
+Missing Vinput (400):
+
+```json
+{
+  "error": "Vinput is required."
+}
+```
+
+Missing Vinput fields (400):
+
+```json
+{
+  "error": "Vinput.component is required."
+}
+```
+
+Invalid numeric parameter (400):
+
+```json
+{
+  "error": "initial_voltage must be numeric"
+}
+```
+
+Equal initial and final voltage (400):
+
+```json
+{
+  "error": "initial_voltage and final_voltage cannot be equal"
+}
+```
+
+Invalid step for forward sweep (400):
+
+```json
+{
+  "error": "For forward sweep (initial < final), step must be positive"
+}
+```
+
+Invalid step for backward sweep (400):
+
+```json
+{
+  "error": "For backward sweep (initial > final), step must be negative"
+}
+```
+
+Step magnitude too large (400):
+
+```json
+{
+  "error": "Step magnitude cannot exceed the voltage range"
+}
+```
+
+Component not found (400):
+
+```json
+{
+  "error": "Vinput.component 'V1' must exist in circuit dc_voltage_sources."
+}
+```
+
+Invalid nodes_to_track (400):
+
+```json
+{
+  "error": "nodes_to_track must be a non-empty array."
+}
+```
+
+Node not found (400):
+
+```json
+{
+  "error": "Node 5 must exist in circuit nodes."
+}
+```
+
+Ground node error (400):
+
+```json
+{
+  "error": "Node 0 (ground) cannot be tracked in DC sweep analysis."
+}
+```
+
+Vinput.from_node error (400):
+
+```json
+{
+  "error": "nodes_to_track cannot include Vinput.from_node."
+}
+```
+
+Simulation error (500):
+
+```json
+{
+  "error": "DC sweep simulation failed: [detailed error message]"
+}
+```
+
+**Technical Notes:**
+
+1. **DC Sweep Analysis**: The endpoint performs DC sweep analysis using PySpice's `.dc()` method, which sweeps a voltage source across a specified range and calculates node voltages at each step. This is different from operating point analysis (`.operating_point()`) which calculates voltages at a single DC point.
+
+2. **Voltage Source Parameter**: The DC sweep uses the voltage source name directly as the parameter in `simulator.dc()`. For example, if the voltage source is named "V1", the sweep is performed as `simulator.dc(V1=slice(initial, final, step))`. The parameter name must exactly match the voltage source name in the circuit.
+
+3. **Analysis Result Access**: The analysis results are accessed using node numbers as string keys (e.g., `analysis["1"]` for node 1, `analysis["2"]` for node 2). The input voltage for plotting is taken from the `from` node of the swept voltage source, not from the voltage source name itself.
+
+4. **Plot Generation**: The plot is generated using matplotlib's `Figure()` API (non-pyplot) for thread-safety in Flask applications. The figure is saved to a BytesIO buffer, encoded to base64, and then closed to free memory.
+
+5. **Forward vs Backward Sweeps**: 
+   - **Forward sweep** (0V → 10V, step=0.1V): Voltage increases from initial to final
+   - **Backward sweep** (10V → 0V, step=-0.1V): Voltage decreases from initial to final
+   - The system automatically validates that the step sign matches the sweep direction
+
+6. **Step Size Validation**: The step magnitude is validated to ensure it doesn't exceed the voltage range. This prevents invalid sweep configurations that could cause errors or infinite loops. For example:
+   - Forward sweep: `step <= (final - initial)` ensures the step doesn't skip past the final voltage
+   - Backward sweep: `abs(step) <= (initial - final)` ensures the step doesn't skip past the final voltage
+
+7. **Node Tracking Validation**: All nodes in `nodes_to_track` must be different from the `from` node of the swept voltage source, as tracking the input node itself would result in a trivial linear plot. The system validates this to ensure meaningful analysis results. Multiple nodes can be tracked simultaneously, with each node plotted as a separate line with a legend.
+
+8. **Base64 Encoding**: The plot is returned as a base64-encoded PNG string, making it easy to embed directly in HTML (`<img src="data:image/png;base64,...">`) or use in React/Next.js applications without requiring separate file handling.
+
+**Use Cases:**
+
+- **Transfer Characteristics**: Analyze how output voltage changes with input voltage (e.g., amplifier gain, diode I-V curves)
+- **Linearity Analysis**: Determine the linear operating range of a circuit
+- **Threshold Detection**: Find voltage thresholds where circuit behavior changes (e.g., switching points, saturation)
+- **Component Characterization**: Understand how components respond to varying input voltages
+- **Design Validation**: Verify circuit behavior across the expected operating range
+
+**Limitations:**
+
+- Step size must be chosen carefully - very small steps may result in long simulation times, while very large steps may miss important features
+- Large voltage ranges with small steps may generate many data points and increase processing time
+- Convergence issues may occur at certain voltage points (standard SPICE limitation)
+- The plot resolution is fixed at 100 DPI - for higher resolution, modify the `dpi` parameter in `plot_to_base64()`
+
+---
+
+### 4. Transient Analysis
+
+**Endpoint:** `POST /circuit/transient`
+
+**Description:** Performs time-domain transient analysis on an electronic circuit, simulating the circuit's response over time. Returns a base64-encoded PNG plot showing voltage vs time for one or more tracked nodes. This is useful for analyzing circuit behavior in the time domain, such as step responses, oscillations, charging/discharging of capacitors, and transient effects.
+
+**Key Features:**
+
+- **Time-Domain Simulation**: Simulates circuit behavior over a specified time period
+- **Multiple Node Tracking**: Can track and plot multiple nodes simultaneously on the same plot
+- **Comprehensive Validation**: Validates time parameters, node existence, and prevents ground node tracking
+- **Base64 Plot Response**: Returns plot as base64-encoded PNG for easy embedding in web applications
+- **Thread-Safe Plotting**: Uses matplotlib Figure API (non-pyplot) for thread-safe operation in Flask
+
+**Request Body:**
+
+The request must be a JSON object with a `circuit` field (same structure as `/circuit/simulate`), plus `step_time`, `end_time`, and `nodes_to_track` fields:
+
+```json
+{
+  "circuit": {
+    "name": "Transient Circuit",
+    "nodes": [1, 2, 3, 0],
+    "dc_voltage_sources": [
+      {
+        "name": "V1",
+        "from": 1,
+        "to": 0,
+        "voltage": 10
+      }
+    ],
+    "ac_voltage_sources": [
+      {
+        "name": "Vac1",
+        "from": 1,
+        "to": 0,
+        "amplitude": 5,
+        "frequency": 1000
+      }
+    ],
+    "resistors": [
+      {
+        "name": "R1",
+        "from": 1,
+        "to": 2,
+        "resistance": 1000
+      }
+    ],
+    "capacitors": [
+      {
+        "name": "C1",
+        "from": 2,
+        "to": 0,
+        "capacitance": 0.001
+      }
+    ]
+  },
+  "step_time": 0.0001,
+  "end_time": 0.1,
+  "nodes_to_track": [1, 2, 3]
+}
+```
+
+**Request Fields:**
+
+- `circuit` (required): Circuit definition object (same structure as `/circuit/simulate` endpoint)
+- `step_time` (required): Time step size in seconds (numeric: int or float, must be positive)
+- `end_time` (required): End time in seconds (numeric: int or float, must be greater than step_time)
+- `nodes_to_track` (required): Array of node numbers to track and plot (must be non-empty array, all nodes must exist in circuit.nodes, cannot include ground node 0)
+
+**Time Parameter Validation:**
+
+The system performs comprehensive validation:
+
+1. **Numeric Validation**: `step_time` and `end_time` must be numeric (int or float)
+2. **Positive Step**: `step_time > 0` (must be positive)
+3. **Valid Range**: `end_time > step_time` (end time must be greater than step time)
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "plot_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
+}
+```
+
+**Response Fields:**
+
+- `status`: Always "ok" for successful analyses
+- `plot_base64`: Base64-encoded PNG image string of the transient plot. The plot shows:
+  - **X-axis**: Time (s) - linear scale
+  - **Y-axis**: Voltage (V) - linear scale
+  - **Multiple lines**: One line per tracked node with legend labels (e.g., "Node 1", "Node 2")
+  - **Grid**: Light grid lines for easier reading
+
+**cURL Example:**
+
+```bash
+curl -X POST http://localhost:5000/circuit/transient \
+  -H "Content-Type: application/json" \
+  -d '{
+    "circuit": {
+      "name": "RC Circuit",
+      "nodes": [1, 2, 0],
+      "ac_voltage_sources": [
+        {
+          "name": "Vac1",
+          "from": 1,
+          "to": 0,
+          "amplitude": 5,
+          "frequency": 1000
+        }
+      ],
+      "resistors": [
+        {
+          "name": "R1",
+          "from": 1,
+          "to": 2,
+          "resistance": 1000
+        }
+      ],
+      "capacitors": [
+        {
+          "name": "C1",
+          "from": 2,
+          "to": 0,
+          "capacitance": 0.001
+        }
+      ]
+    },
+    "step_time": 0.0001,
+    "end_time": 0.1,
+    "nodes_to_track": [1, 2]
+  }'
+```
+
+**Postman Example:**
+
+1. **Method:** `POST`
+2. **URL:** `http://localhost:5000/circuit/transient`
+3. **Headers:**
+   - `Content-Type: application/json`
+4. **Body:**
+   - Select `raw`
+   - Choose `JSON` format
+   - Paste the circuit JSON structure with `step_time`, `end_time`, and `nodes_to_track` fields
+
+**Error Responses:**
+
+Missing circuit (400):
+
+```json
+{
+  "error": "Circuit is required."
+}
+```
+
+Missing step_time (400):
+
+```json
+{
+  "error": "step_time is required."
+}
+```
+
+Invalid step_time (400):
+
+```json
+{
+  "error": "step_time must be numeric."
+}
+```
+
+Invalid step_time value (400):
+
+```json
+{
+  "error": "step_time must be positive"
+}
+```
+
+Invalid end_time (400):
+
+```json
+{
+  "error": "end_time must be greater than step_time"
+}
+```
+
+Invalid nodes_to_track (400):
+
+```json
+{
+  "error": "nodes_to_track must be a non-empty array."
+}
+```
+
+Node not found (400):
+
+```json
+{
+  "error": "Node 5 must exist in circuit nodes."
+}
+```
+
+Ground node error (400):
+
+```json
+{
+  "error": "Node 0 (ground) cannot be tracked in transient analysis."
+}
+```
+
+Simulation error (500):
+
+```json
+{
+  "error": "Transient analysis failed: [detailed error message]"
+}
+```
+
+**Technical Notes:**
+
+1. **Transient Analysis**: The endpoint performs transient analysis using PySpice's `.transient()` method, which simulates the circuit's time-domain response. This is different from DC analysis which calculates steady-state values at a single point in time.
+
+2. **Time Array Access**: The analysis results provide `analysis.time` containing the time array and `analysis[node_key]` containing voltage arrays for each node. Time is accessed directly from the analysis object.
+
+3. **Multiple Node Tracking**: Unlike DC sweep which tracks a single node, transient analysis can track multiple nodes simultaneously. Each node is plotted as a separate line with a legend label.
+
+4. **Ground Node Limitation**: Node 0 (ground) cannot be tracked because it's not accessible in PySpice analysis results (always 0V by definition). The system validates this to prevent errors.
+
+5. **Plot Generation**: The plot is generated using matplotlib's `Figure()` API (non-pyplot) for thread-safety in Flask applications. Multiple lines are plotted on the same axes with a legend.
+
+6. **Time Step Selection**: The `step_time` should be chosen based on the circuit's time constants and the fastest signal of interest. Very small steps increase simulation time, while large steps may miss important transient details.
+
+**Use Cases:**
+
+- **Step Response Analysis**: Analyze how a circuit responds to sudden changes (e.g., switch closures, step inputs)
+- **Oscillation Analysis**: Observe oscillatory behavior in circuits (e.g., LC oscillators, relaxation oscillators)
+- **Charging/Discharging**: Study capacitor charging and discharging behavior in RC circuits
+- **Transient Effects**: Understand transient behavior before circuits reach steady state
+- **Signal Propagation**: Track how signals propagate through circuits over time
+
+**Limitations:**
+
+- Ground node (0) cannot be tracked
+- Very small step times with long end times may result in long simulation times
+- Large numbers of tracked nodes may make the plot cluttered
+- Convergence issues may occur with certain circuit topologies (standard SPICE limitation)
+
+---
+
+### 5. AC Sweep Analysis
+
+**Endpoint:** `POST /circuit/ac-sweep`
+
+**Description:** Performs AC frequency sweep analysis on an electronic circuit, analyzing the circuit's frequency response. Returns a base64-encoded PNG Bode plot showing magnitude (in dB) and phase (in degrees) vs frequency for a tracked node. This is useful for analyzing filter characteristics, frequency response, bandwidth, and phase relationships.
+
+**Key Features:**
+
+- **Frequency-Domain Analysis**: Analyzes circuit behavior across a frequency range
+- **Bode Plot Generation**: Creates dual-subplot Bode diagram (magnitude and phase)
+- **Logarithmic Frequency Scale**: Uses logarithmic scale for frequency axis (standard for Bode plots)
+- **Decade or Linear Sweep**: Supports both decade (logarithmic) and linear frequency sweeps
+- **Comprehensive Validation**: Validates frequency parameters, variation type, and requires AC voltage sources
+- **Base64 Plot Response**: Returns plot as base64-encoded PNG for easy embedding
+- **Thread-Safe Plotting**: Uses matplotlib Figure API (non-pyplot) for thread-safe operation
+
+**Request Body:**
+
+The request must be a JSON object with a `circuit` field (same structure as `/circuit/simulate`), plus AC sweep parameters:
+
+```json
+{
+  "circuit": {
+    "name": "AC Analysis Circuit",
+    "nodes": [1, 2, 0],
+    "ac_voltage_sources": [
+      {
+        "name": "Vac1",
+        "from": 1,
+        "to": 0,
+        "amplitude": 5,
+        "frequency": 1000
+      }
+    ],
+    "resistors": [
+      {
+        "name": "R1",
+        "from": 1,
+        "to": 2,
+        "resistance": 1000
+      }
+    ],
+    "capacitors": [
+      {
+        "name": "C1",
+        "from": 2,
+        "to": 0,
+        "capacitance": 0.001
+      }
+    ]
+  },
+  "start_frequency": 1,
+  "stop_frequency": 1000000,
+  "number_of_points": 10,
+  "variation": "dec",
+  "node_to_track": 2
+}
+```
+
+**Request Fields:**
+
+- `circuit` (required): Circuit definition object (must contain at least one AC voltage source)
+- `start_frequency` (required): Starting frequency in Hertz (numeric: int or float, must be positive)
+- `stop_frequency` (required): Ending frequency in Hertz (numeric: int or float, must be greater than start_frequency)
+- `number_of_points` (required): Number of frequency points to calculate (integer, must be positive)
+- `variation` (required): Sweep variation type - `"dec"` for decade (logarithmic) or `"lin"` for linear
+- `node_to_track` (required): Node number to track and plot (must exist in circuit.nodes, cannot be ground node 0)
+
+**Frequency Parameter Validation:**
+
+The system performs comprehensive validation:
+
+1. **Numeric Validation**: All frequency/point values must be numeric
+2. **Positive Start**: `start_frequency > 0` (must be positive)
+3. **Valid Range**: `stop_frequency > start_frequency` (stop must be greater than start)
+4. **Positive Points**: `number_of_points > 0` and must be an integer
+5. **Valid Variation**: `variation` must be either `"dec"` (decade) or `"lin"` (linear)
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "plot_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
+}
+```
+
+**Response Fields:**
+
+- `status`: Always "ok" for successful analyses
+- `plot_base64`: Base64-encoded PNG image string of the Bode plot. The plot shows:
+  - **Top Subplot**: Magnitude (dB) vs Frequency (Hz) - logarithmic frequency scale
+  - **Bottom Subplot**: Phase (degrees) vs Frequency (Hz) - logarithmic frequency scale
+  - **Grid**: Light grid lines on both subplots for easier reading
+  - **Title**: "Bode Diagram - Node {node_to_track}"
+
+**cURL Example:**
+
+```bash
+curl -X POST http://localhost:5000/circuit/ac-sweep \
+  -H "Content-Type: application/json" \
+  -d '{
+    "circuit": {
+      "name": "RC Filter",
+      "nodes": [1, 2, 0],
+      "ac_voltage_sources": [
+        {
+          "name": "Vac1",
+          "from": 1,
+          "to": 0,
+          "amplitude": 5,
+          "frequency": 1000
+        }
+      ],
+      "resistors": [
+        {
+          "name": "R1",
+          "from": 1,
+          "to": 2,
+          "resistance": 1000
+        }
+      ],
+      "capacitors": [
+        {
+          "name": "C1",
+          "from": 2,
+          "to": 0,
+          "capacitance": 0.001
+        }
+      ]
+    },
+    "start_frequency": 1,
+    "stop_frequency": 1000000,
+    "number_of_points": 10,
+    "variation": "dec",
+    "node_to_track": 2
+  }'
+```
+
+**Postman Example:**
+
+1. **Method:** `POST`
+2. **URL:** `http://localhost:5000/circuit/ac-sweep`
+3. **Headers:**
+   - `Content-Type: application/json`
+4. **Body:**
+   - Select `raw`
+   - Choose `JSON` format
+   - Paste the circuit JSON structure with AC sweep parameters
+
+**Error Responses:**
+
+Missing circuit (400):
+
+```json
+{
+  "error": "Circuit is required."
+}
+```
+
+Missing start_frequency (400):
+
+```json
+{
+  "error": "start_frequency is required."
+}
+```
+
+Invalid start_frequency (400):
+
+```json
+{
+  "error": "start_frequency must be positive"
+}
+```
+
+Invalid stop_frequency (400):
+
+```json
+{
+  "error": "stop_frequency must be greater than start_frequency"
+}
+```
+
+Invalid number_of_points (400):
+
+```json
+{
+  "error": "number_of_points must be a positive integer"
+}
+```
+
+Invalid variation (400):
+
+```json
+{
+  "error": "variation must be 'dec' or 'lin'"
+}
+```
+
+No AC voltage sources (400):
+
+```json
+{
+  "error": "Circuit must have at least one AC voltage source for AC analysis."
+}
+```
+
+Ground node error (400):
+
+```json
+{
+  "error": "Node 0 (ground) cannot be tracked in AC analysis."
+}
+```
+
+Simulation error (500):
+
+```json
+{
+  "error": "AC sweep simulation failed: [detailed error message]"
+}
+```
+
+**Technical Notes:**
+
+1. **AC Analysis**: The endpoint performs AC analysis using PySpice's `.ac()` method, which performs a frequency-domain analysis. This calculates the circuit's response to sinusoidal inputs at different frequencies.
+
+2. **Complex Voltage**: AC analysis returns complex voltage values (magnitude and phase). The system calculates:
+   - **Magnitude in dB**: `20 * log10(|voltage|)`
+   - **Phase in degrees**: `angle(voltage, deg=True)`
+
+3. **Bode Plot**: The plot consists of two subplots:
+   - **Magnitude Plot**: Shows gain/loss in decibels vs frequency
+   - **Phase Plot**: Shows phase shift in degrees vs frequency
+   - Both use logarithmic frequency scale (standard for Bode plots)
+
+4. **Variation Types**:
+   - `"dec"` (decade): Logarithmic sweep - frequency points are spaced logarithmically (e.g., 1Hz, 10Hz, 100Hz, 1kHz, 10kHz)
+   - `"lin"` (linear): Linear sweep - frequency points are evenly spaced (e.g., 1Hz, 2Hz, 3Hz, ...)
+
+5. **AC Voltage Source Requirement**: AC analysis requires at least one AC voltage source (`ac_voltage_sources`) in the circuit. The system validates this to prevent simulation errors.
+
+6. **Ground Node Limitation**: Node 0 (ground) cannot be tracked because it's not accessible in PySpice analysis results. The system validates this to prevent errors.
+
+7. **Frequency Range Selection**: 
+   - For decade variation, typical ranges span multiple decades (e.g., 1Hz to 1MHz = 6 decades)
+   - For linear variation, smaller ranges are more practical
+   - `number_of_points` determines resolution - more points = smoother plots but longer simulation time
+
+**Use Cases:**
+
+- **Filter Analysis**: Analyze low-pass, high-pass, band-pass, and band-stop filter characteristics
+- **Frequency Response**: Understand how circuits respond to different frequencies
+- **Bandwidth Determination**: Find 3dB bandwidth and cutoff frequencies
+- **Phase Analysis**: Study phase relationships and phase margins
+- **Amplifier Analysis**: Analyze frequency response of amplifiers
+- **Resonance Analysis**: Identify resonant frequencies in LC circuits
+
+**Limitations:**
+
+- Requires at least one AC voltage source in the circuit
+- Ground node (0) cannot be tracked
+- Very wide frequency ranges with many points may result in long simulation times
+- Convergence issues may occur with certain circuit topologies (standard SPICE limitation)
+- The plot resolution is fixed at 100 DPI - for higher resolution, modify the `dpi` parameter in `plot_to_base64()`
+
+---
+
+### 6. Ingest PDFs
 
 **Endpoint:** `POST /rag/ingest`
 
@@ -160,7 +1307,7 @@ Ingestion error (500):
 
 ---
 
-### 3. RAG Chat
+### 7. RAG Chat
 
 **Endpoint:** `POST /rag/chat`
 
@@ -519,7 +1666,7 @@ The system automatically reformulates "Which is better?" to "Which op amp design
 
 ---
 
-### 4. Deck-Based Chat
+### 8. Deck-Based Chat
 
 **Endpoint:** `POST /rag/deck-chat`
 
@@ -865,7 +2012,7 @@ Groq API error:
 
 ---
 
-### 5. Ingest Slide Decks (PDF/PPTX)
+### 9. Ingest Slide Decks (PDF/PPTX)
 
 **Endpoint:** `POST /rag/ingest-slides`
 
@@ -1000,7 +2147,7 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 
 ---
 
-### 6. Generate Quiz from Slide Decks
+### 10. Generate Quiz from Slide Decks
 
 **Endpoint:** `POST /rag/generate-quiz`
 
@@ -1219,7 +2366,7 @@ Groq API error (500):
 
 ---
 
-### 7. General LLM (Non-RAG)
+### 11. General LLM (Non-RAG)
 
 **Endpoint:** `POST /groq/general-llm`
 
@@ -2080,6 +3227,10 @@ All example responses in this document were taken directly from actual test runs
 | Endpoint             | Method | Purpose                                                       | Input                                                                            | Output                     | Response Type |
 | -------------------- | ------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------- | ------------- |
 | `/health`            | GET    | Health check                                                  | None                                                                             | "OK"                       | Plain text    |
+| `/circuit/simulate`  | POST   | Simulate electronic circuit (DC operating point)              | `circuit` (JSON with components, nodes, voltage sources, etc.)                    | Node voltages, currents    | JSON          |
+| `/circuit/dc-sweep`  | POST   | DC sweep analysis with plot                                   | `circuit`, `Vinput` (component, initial, final, step), `nodes_to_track`           | Base64-encoded PNG plot   | JSON          |
+| `/circuit/transient` | POST   | Transient time-domain analysis with plot                      | `circuit`, `step_time`, `end_time`, `nodes_to_track`                             | Base64-encoded PNG plot   | JSON          |
+| `/circuit/ac-sweep`  | POST   | AC frequency sweep analysis with Bode plot                    | `circuit`, `start_frequency`, `stop_frequency`, `number_of_points`, `variation`, `node_to_track` | Base64-encoded PNG plot   | JSON          |
 | `/rag/ingest`        | POST   | Ingest PDFs from directory                                    | `data_dir` (optional)                                                            | Ingestion summary          | JSON          |
 | `/rag/chat`          | POST   | RAG-powered Q&A (with intelligent enhancements)               | `question`, `messages`, `session_id`, `top_k`, `use_query_expansion`             | Streaming answer + sources | SSE stream    |
 | `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered, with intelligent enhancements) | `question`, `messages`, `session_id`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
