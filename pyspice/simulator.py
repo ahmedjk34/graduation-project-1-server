@@ -10,17 +10,18 @@ from .util import format_analysis
 def create_circuit(circuit_data: Dict) -> Circuit:
     """
     Create a PySpice circuit from a payload dictionary.
-    
+
     Args:
         circuit_data: Dictionary containing:
             - name: Name of the circuit
             - nodes: List of node numbers
-            - voltage_sources: List of voltage source dicts with 'name', 'from', 'to', 'voltage'
+            - dc_voltage_sources: List of DC voltage source dicts with 'name', 'from', 'to', 'voltage'
+            - ac_voltage_sources: List of AC voltage source dicts with 'name', 'from', 'to', 'amplitude', 'frequency'
             - resistors: List of resistor dicts with 'name', 'from', 'to', 'resistance'
             - capacitors: List of capacitor dicts with 'name', 'from', 'to', 'capacitance'
             - diodes: List of diode dicts with 'name', 'from', 'to', 'model'
             - bjts: List of BJT dicts with 'name', 'collector', 'base', 'emitter', 'model'
-    
+
     Returns:
         Circuit: PySpice Circuit object
     """
@@ -34,12 +35,22 @@ def create_circuit(circuit_data: Dict) -> Circuit:
     # We use this to track which models we already fetched [hashmap, slight optimization ;) ]
     added_models = set()
     
-    for vs in circuit_data.get('voltage_sources', []):
+    # DC voltage sources
+    for vs in circuit_data.get('dc_voltage_sources', []):
         name = vs['name']
         from_node = get_node(vs['from'])
         to_node = get_node(vs['to'])
         voltage = vs['voltage'] @ u_V
         circuit.V(name, from_node, to_node, voltage)
+
+    # AC voltage sources (sinusoidal)
+    for vs in circuit_data.get('ac_voltage_sources', []):
+        name = vs['name']
+        from_node = get_node(vs['from'])
+        to_node = get_node(vs['to'])
+        amplitude = vs['amplitude'] @ u_V
+        frequency = vs['frequency'] @ u_Hz
+        circuit.SinusoidalVoltageSource(name, from_node, to_node, amplitude=amplitude, frequency=frequency)
     
     for r in circuit_data.get('resistors', []):
         name = r['name']

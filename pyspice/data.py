@@ -1,7 +1,9 @@
 from PySpice.Unit import *
 
-# Format for voltage source:
+# Format for DC voltage source:
 # circuit.V('name', 'node from', 'node to', voltage value)
+# Format for AC voltage source:
+# circuit.SinusoidalVoltageSource('name', 'node from', 'node to', amplitude=amplitude@u_V, frequency=frequency@u_Hz)
 # Format for resistor:
 # circuit.R('name', 'node from', 'node to', resistance value)
 # Format for diode:

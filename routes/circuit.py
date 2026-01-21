@@ -26,7 +26,7 @@ logger = Logging.setup_logging()
 #     "circuit":{
 #   "name": "name",
 #   "nodes": [1, 2, 3, 0],
-#   "voltage_sources": [
+#   "dc_voltage_sources": [
 #     {
 #       "name": "V1",
 #       "from": 1,
@@ -145,16 +145,16 @@ def dc_sweep():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     
-    # Validate that component exists in circuit voltage_sources
-    voltage_sources = circuit_payload.get("voltage_sources", [])
+    # Validate that component exists in circuit dc_voltage_sources
+    dc_voltage_sources = circuit_payload.get("dc_voltage_sources", [])
     vinput_source = None
-    for vs in voltage_sources:
+    for vs in dc_voltage_sources:
         if vs.get("name") == component_name:
             vinput_source = vs
             break
-    
+
     if not vinput_source:
-        return jsonify({"error": f"Vinput.component '{component_name}' must exist in circuit voltage_sources."}), 400
+        return jsonify({"error": f"Vinput.component '{component_name}' must exist in circuit dc_voltage_sources."}), 400
     
     # Get voltage source nodes
     vinput_from_node = vinput_source.get("from")

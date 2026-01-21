@@ -78,7 +78,7 @@ The request must be a JSON object with a `circuit` field containing the circuit 
   "circuit": {
     "name": "My Circuit",
     "nodes": [1, 2, 3, 0],
-    "voltage_sources": [
+    "dc_voltage_sources": [
       {
         "name": "V1",
         "from": 1,
@@ -90,6 +90,15 @@ The request must be a JSON object with a `circuit` field containing the circuit 
         "from": 2,
         "to": 0,
         "voltage": 5
+      }
+    ],
+    "ac_voltage_sources": [
+      {
+        "name": "Vac1",
+        "from": 3,
+        "to": 0,
+        "amplitude": 5,
+        "frequency": 1000
       }
     ],
     "resistors": [
@@ -140,11 +149,17 @@ The request must be a JSON object with a `circuit` field containing the circuit 
 
 - `name` (required): Name identifier for the circuit
 - `nodes` (required): Array of node numbers used in the circuit. Node `0` is always ground.
-- `voltage_sources` (optional): Array of voltage source objects:
+- `dc_voltage_sources` (optional): Array of DC voltage source objects:
   - `name`: Component name (e.g., "V1", "V2")
   - `from`: Source node number
   - `to`: Destination node number (typically 0 for ground)
   - `voltage`: Voltage value in Volts (numeric, no unit suffix needed)
+- `ac_voltage_sources` (optional): Array of AC voltage source objects:
+  - `name`: Component name (e.g., "Vac1", "Vsin")
+  - `from`: Source node number
+  - `to`: Destination node number (typically 0 for ground)
+  - `amplitude`: Amplitude value in Volts (numeric, no unit suffix needed)
+  - `frequency`: Frequency value in Hertz (numeric, no unit suffix needed)
 - `resistors` (optional): Array of resistor objects:
   - `name`: Component name (e.g., "R1", "R2", "R1312312" - any name is valid)
   - `from`: First terminal node number
@@ -227,7 +242,7 @@ curl -X POST http://localhost:5000/circuit/simulate \
     "circuit": {
       "name": "Test Circuit",
       "nodes": [1, 2, 0],
-      "voltage_sources": [
+      "dc_voltage_sources": [
         {
           "name": "V1",
           "from": 1,
@@ -340,7 +355,7 @@ The request must be a JSON object with a `circuit` field (same structure as `/ci
   "circuit": {
     "name": "DC Sweep Circuit",
     "nodes": [1, 2, 0],
-    "voltage_sources": [
+    "dc_voltage_sources": [
       {
         "name": "V1",
         "from": 1,
@@ -385,7 +400,7 @@ The request must be a JSON object with a `circuit` field (same structure as `/ci
 
 - `circuit` (required): Circuit definition object (same structure as `/circuit/simulate` endpoint)
 - `Vinput` (required): Voltage source sweep configuration object:
-  - `component` (required): Name of the voltage source to sweep (must exist in `circuit.voltage_sources`)
+  - `component` (required): Name of the voltage source to sweep (must exist in `circuit.dc_voltage_sources`)
   - `initial_voltage` (required): Starting voltage value in Volts (numeric: int or float)
   - `final_voltage` (required): Ending voltage value in Volts (numeric: int or float)
   - `step` (required): Voltage step size in Volts (numeric: int or float)
@@ -430,7 +445,7 @@ curl -X POST http://localhost:5000/circuit/dc-sweep \
     "circuit": {
       "name": "Diode Sweep",
       "nodes": [1, 2, 0],
-      "voltage_sources": [
+      "dc_voltage_sources": [
         {
           "name": "V1",
           "from": 1,
@@ -571,7 +586,7 @@ Component not found (400):
 
 ```json
 {
-  "error": "Vinput.component 'V1' must exist in circuit voltage_sources."
+  "error": "Vinput.component 'V1' must exist in circuit dc_voltage_sources."
 }
 ```
 
