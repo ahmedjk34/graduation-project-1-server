@@ -46,7 +46,9 @@ def create_circuit(circuit_data: Dict) -> Circuit:
         from_node = get_node(r['from'])
         to_node = get_node(r['to'])
         resistance = r['resistance'] @ u_Ohm
-        circuit.R(name, from_node, to_node, resistance)
+        resistor = circuit.R(name, from_node, to_node, resistance)
+        resistor.plus.add_current_probe(circuit)
+
     
     for c in circuit_data.get('capacitors', []):
         name = c['name']
@@ -105,3 +107,30 @@ def simulate_circuit(circuit: Circuit) -> Dict:
     analysis = simulator.operating_point()
 
     return format_analysis(analysis)
+
+
+#IDEA:
+# I actually figure the arbitrary nodes on the front-end, and I also do the resistor names
+# I tested many combinations, and the result is always the same vr[REISTOR_NAME_SMALLCASE]_plus
+# I can use that + the payload passed from the frontend, and I can map the resistors to the nodes
+# Which I can use to get the current for each resistor, therefore nodes.
+
+from typing import Dict, Any, List
+
+#what to return:
+# e.g. 
+# {"resistor1": {"from_node": 1, "to_node": 2, "current": 0.1}}
+def map_resistors_and_currents_to_nodes(node_currents: Dict[str, float], resistors: list[dict[str, str]]) -> Dict[str, Any]:
+    """
+    Map the resistors to the nodes in the circuit.
+    """
+    resistor_nodes_and_currents = {}
+    for resistor in resistors:
+        resistor_name = resistor['name']
+        resistor_current = node_currents.get(f'vr{resistor_name.lower()}_plus')
+        resistor_nodes_and_currents[resistor_name] = {
+            "current": resistor_current,
+            "from_node": resistor['from'],
+            "to_node": resistor['to']
+        }
+    return resistor_nodes_and_currents

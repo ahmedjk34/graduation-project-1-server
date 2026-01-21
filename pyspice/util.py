@@ -47,6 +47,14 @@ def format_analysis(
         node_voltages[node] = cast_waveform(waveform) if cast else waveform
     res['node_voltages'] = node_voltages
 
+    node_currents = {}
+    # Note, in the tutorial, they use analysis.branches.values(), but that did not work for me
+    # Kept getting that error [TypeError: unhashable type: 'WaveForm']
+    # So, I kind of took a guess based on the first tutorial series, and used the functions I took from github, and it worked. lol
+    for branch_name, waveform in analysis.branches.items():
+        node_currents[branch_name] = cast_waveform(waveform) if cast else waveform
+    res['node_currents'] = node_currents
+
     # Include time if it exists
     if hasattr(analysis, 'time'):
         res['time'] = cast_waveform(analysis.time) if cast else analysis.time
@@ -54,6 +62,7 @@ def format_analysis(
     # Include frequency if it exists
     if hasattr(analysis, 'frequency'):
         res['frequency'] = cast_waveform(analysis.frequency) if cast else analysis.frequency
+
 
     return res
 
@@ -76,3 +85,10 @@ def write_line_to_netlist(
     """
     circuit.raw_spice += new_line + os.linesep
     return circuit
+
+
+def build_simulation_response(simulation_results: Dict[str, float], resistor_nodes_and_currents: Dict[str, float]) -> Dict[str, float]:
+    response = simulation_results.copy()
+    if 'node_currents' in response:
+        response['node_currents'] = resistor_nodes_and_currents
+    return response
