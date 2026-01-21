@@ -6,8 +6,8 @@ import PySpice.Spice.Simulation
 import sys
 
 from pyspice.simulator import create_circuit, map_resistors_and_currents_to_nodes, simulate_circuit
-from pyspice.util import build_simulation_response, validate_sweep_parameters
-from pyspice.sweeps import dc_sweep_analysis, plot_dc_sweep, plot_to_base64
+from pyspice.util import build_simulation_response, validate_sweep_parameters, plot_to_base64
+from pyspice.sweeps import dc_sweep_analysis, plot_dc_sweep
 
 if sys.platform == "linux" or sys.platform == "linux2":
     PySpice.Spice.Simulation.CircuitSimulator.DEFAULT_SIMULATOR = 'ngspice-shared'
@@ -107,6 +107,7 @@ def simulate():
 @circuit_bp.route("/dc-sweep", methods=["POST"])
 def dc_sweep():
     body = request.get_json()
+    print(body)
     if not body:
         return jsonify({"error": "Request must be JSON."}), 400
     
