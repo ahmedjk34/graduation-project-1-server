@@ -1,10 +1,15 @@
 # This file is directly copied from the tutorial repo [https://github.com/benedictjones/engineeringthings-pyspice/blob/main/utils/methods.py]
+import base64
+import io
+from matplotlib.figure import Figure
 import numpy as np
 import os
 from typing import List, Dict, Optional
 import PySpice
 import PySpice.Probe.WaveForm
 from PySpice.Spice.Netlist import Circuit
+import matplotlib.pyplot as plt
+
 
 def cast_waveform(waveform) -> np.ndarray|float:
     """
@@ -92,3 +97,52 @@ def build_simulation_response(simulation_results: Dict[str, float], resistor_nod
     if 'node_currents' in response:
         response['node_currents'] = resistor_nodes_and_currents
     return response
+
+
+
+# This is a logical validation function that I thought about, was thinking about allowed start , final, vals, and realized it's a free game as long as step size agrees
+def validate_sweep_parameters(initial_voltage, final_voltage, step):
+
+    # Check if all values are numeric
+    if not isinstance(initial_voltage, (int, float)):
+        raise ValueError("initial_voltage must be numeric")
+    if not isinstance(final_voltage, (int, float)):
+        raise ValueError("final_voltage must be numeric")
+    if not isinstance(step, (int, float)):
+        raise ValueError("step must be numeric")
+    
+    # Check if range is non-zero
+    if initial_voltage == final_voltage:
+        raise ValueError("initial_voltage and final_voltage cannot be equal")
+    
+    # Forward sweep (initial < final)
+    if initial_voltage < final_voltage:
+        if step <= 0:
+            raise ValueError("For forward sweep (initial < final), step must be positive")
+        if step > (final_voltage - initial_voltage):
+            raise ValueError("Step magnitude cannot exceed the voltage range")
+    
+    # Backward sweep (initial > final)
+    elif initial_voltage > final_voltage:
+        if step >= 0:
+            raise ValueError("For backward sweep (initial > final), step must be negative")
+        if abs(step) > (initial_voltage - final_voltage):
+            raise ValueError("Step magnitude cannot exceed the voltage range")
+    
+    return True, None
+
+
+
+
+def plot_to_base64(fig: Figure) -> str:
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    
+    data = base64.b64encode(buf.getbuffer()).decode("ascii")
+    
+    # Close figure to free memory
+    plt.close(fig)
+    
+    return data

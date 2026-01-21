@@ -7,7 +7,7 @@
 ## Overview
 
 This API provides endpoints for:
-1. **Circuit Simulation**: Simulating electronic circuits using PySpice (NGSpice backend) with intelligent resistor-to-node current mapping
+1. **Circuit Simulation**: Simulating electronic circuits using PySpice (NGSpice backend) with intelligent resistor-to-node current mapping, including DC operating point analysis and DC sweep analysis with plot generation
 2. **Document Ingestion**: Ingesting PDF documents and slide decks (PDF/PPTX) into a vector database (ChromaDB)
 3. **RAG Queries**: Performing Retrieval-Augmented Generation (RAG) queries against ingested content
 4. **Quiz Generation**: Generating quizzes from slide decks
@@ -317,7 +317,322 @@ The server will return a 500 error with detailed error information in the respon
 
 ---
 
-### 3. Ingest PDFs
+### 3. DC Sweep Analysis
+
+**Endpoint:** `POST /circuit/dc-sweep`
+
+**Description:** Performs DC sweep analysis on an electronic circuit by sweeping a voltage source across a specified range and tracking the voltage response at a selected node. Returns a base64-encoded PNG plot showing the input voltage (x-axis) vs tracked node voltage (y-axis). This is useful for analyzing circuit behavior across different input voltage levels, such as transfer characteristics, linearity analysis, and threshold detection.
+
+**Key Features:**
+
+- **Voltage Source Sweeping**: Sweeps any voltage source in the circuit from an initial voltage to a final voltage with a specified step size
+- **Forward and Backward Sweeps**: Supports both forward sweeps (increasing voltage) and backward sweeps (decreasing voltage) with automatic step sign validation
+- **Comprehensive Validation**: Validates all numeric parameters, sweep direction, step magnitude, and circuit topology
+- **Base64 Plot Response**: Returns plot as base64-encoded PNG for easy embedding in web applications (React/Next.js compatible)
+- **Thread-Safe Plotting**: Uses matplotlib Figure API (non-pyplot) for thread-safe operation in Flask
+
+**Request Body:**
+
+The request must be a JSON object with a `circuit` field (same structure as `/circuit/simulate`), plus `Vinput` and `node_to_track` fields:
+
+```json
+{
+  "circuit": {
+    "name": "DC Sweep Circuit",
+    "nodes": [1, 2, 0],
+    "voltage_sources": [
+      {
+        "name": "V1",
+        "from": 1,
+        "to": 0,
+        "voltage": 10
+      }
+    ],
+    "resistors": [
+      {
+        "name": "R1",
+        "from": 1,
+        "to": 2,
+        "resistance": 1000
+      },
+      {
+        "name": "R2",
+        "from": 2,
+        "to": 0,
+        "resistance": 2200
+      }
+    ],
+    "diodes": [
+      {
+        "name": "D1",
+        "from": 2,
+        "to": 0,
+        "model": "1N4148"
+      }
+    ]
+  },
+  "Vinput": {
+    "component": "V1",
+    "initial_voltage": 0,
+    "final_voltage": 10,
+    "step": 0.1
+  },
+  "node_to_track": 2
+}
+```
+
+**Request Fields:**
+
+- `circuit` (required): Circuit definition object (same structure as `/circuit/simulate` endpoint)
+- `Vinput` (required): Voltage source sweep configuration object:
+  - `component` (required): Name of the voltage source to sweep (must exist in `circuit.voltage_sources`)
+  - `initial_voltage` (required): Starting voltage value in Volts (numeric: int or float)
+  - `final_voltage` (required): Ending voltage value in Volts (numeric: int or float)
+  - `step` (required): Voltage step size in Volts (numeric: int or float)
+- `node_to_track` (required): Node number to track and plot on y-axis (must exist in `circuit.nodes` and cannot be the same as `Vinput.from_node`)
+
+**Sweep Parameter Validation:**
+
+The system performs comprehensive validation of sweep parameters:
+
+1. **Numeric Validation**: All voltage/step values must be numeric (int or float)
+2. **Range Validation**: `initial_voltage` and `final_voltage` cannot be equal (range must be non-zero)
+3. **Forward Sweep** (initial_voltage < final_voltage):
+   - `step` must be positive (> 0)
+   - `step` magnitude cannot exceed the range: `step <= (final_voltage - initial_voltage)`
+4. **Backward Sweep** (initial_voltage > final_voltage):
+   - `step` must be negative (< 0)
+   - `step` magnitude cannot exceed the range: `abs(step) <= (initial_voltage - final_voltage)`
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "plot_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
+}
+```
+
+**Response Fields:**
+
+- `status`: Always "ok" for successful sweeps
+- `plot_base64`: Base64-encoded PNG image string of the DC sweep plot. The plot shows:
+  - **X-axis**: Input Voltage (V) - the voltage at the `from` node of the swept voltage source
+  - **Y-axis**: Node {node_to_track} Voltage (V) - the voltage at the tracked node
+  - **Grid**: Light grid lines for easier reading
+
+**cURL Example:**
+
+```bash
+curl -X POST http://localhost:5000/circuit/dc-sweep \
+  -H "Content-Type: application/json" \
+  -d '{
+    "circuit": {
+      "name": "Diode Sweep",
+      "nodes": [1, 2, 0],
+      "voltage_sources": [
+        {
+          "name": "V1",
+          "from": 1,
+          "to": 0,
+          "voltage": 10
+        }
+      ],
+      "resistors": [
+        {
+          "name": "R1",
+          "from": 1,
+          "to": 2,
+          "resistance": 1000
+        }
+      ],
+      "diodes": [
+        {
+          "name": "D1",
+          "from": 2,
+          "to": 0,
+          "model": "1N4148"
+        }
+      ]
+    },
+    "Vinput": {
+      "component": "V1",
+      "initial_voltage": 0,
+      "final_voltage": 10,
+      "step": 0.1
+    },
+    "node_to_track": 2
+  }'
+```
+
+**Postman Example:**
+
+1. **Method:** `POST`
+2. **URL:** `http://localhost:5000/circuit/dc-sweep`
+3. **Headers:**
+   - `Content-Type: application/json`
+4. **Body:**
+   - Select `raw`
+   - Choose `JSON` format
+   - Paste the circuit JSON structure with `Vinput` and `node_to_track` fields
+
+**JavaScript Example (Displaying Base64 Plot):**
+
+```javascript
+async function performDCSweep(circuitData, vinputConfig, nodeToTrack) {
+  const response = await fetch("http://localhost:5000/circuit/dc-sweep", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      circuit: circuitData,
+      Vinput: vinputConfig,
+      node_to_track: nodeToTrack,
+    }),
+  });
+
+  const data = await response.json();
+  
+  if (data.status === "ok") {
+    // Display the plot in an img tag
+    const img = document.createElement("img");
+    img.src = `data:image/png;base64,${data.plot_base64}`;
+    document.getElementById("plot-container").appendChild(img);
+  }
+}
+```
+
+**Error Responses:**
+
+Missing circuit (400):
+
+```json
+{
+  "error": "Circuit is required."
+}
+```
+
+Missing Vinput (400):
+
+```json
+{
+  "error": "Vinput is required."
+}
+```
+
+Missing Vinput fields (400):
+
+```json
+{
+  "error": "Vinput.component is required."
+}
+```
+
+Invalid numeric parameter (400):
+
+```json
+{
+  "error": "initial_voltage must be numeric"
+}
+```
+
+Equal initial and final voltage (400):
+
+```json
+{
+  "error": "initial_voltage and final_voltage cannot be equal"
+}
+```
+
+Invalid step for forward sweep (400):
+
+```json
+{
+  "error": "For forward sweep (initial < final), step must be positive"
+}
+```
+
+Invalid step for backward sweep (400):
+
+```json
+{
+  "error": "For backward sweep (initial > final), step must be negative"
+}
+```
+
+Step magnitude too large (400):
+
+```json
+{
+  "error": "Step magnitude cannot exceed the voltage range"
+}
+```
+
+Component not found (400):
+
+```json
+{
+  "error": "Vinput.component 'V1' must exist in circuit voltage_sources."
+}
+```
+
+Invalid node_to_track (400):
+
+```json
+{
+  "error": "node_to_track cannot be the same as Vinput.from_node."
+}
+```
+
+Simulation error (500):
+
+```json
+{
+  "error": "DC sweep simulation failed: [detailed error message]"
+}
+```
+
+**Technical Notes:**
+
+1. **DC Sweep Analysis**: The endpoint performs DC sweep analysis using PySpice's `.dc()` method, which sweeps a voltage source across a specified range and calculates node voltages at each step. This is different from operating point analysis (`.operating_point()`) which calculates voltages at a single DC point.
+
+2. **Voltage Source Parameter**: The DC sweep uses the voltage source name directly as the parameter in `simulator.dc()`. For example, if the voltage source is named "V1", the sweep is performed as `simulator.dc(V1=slice(initial, final, step))`. The parameter name must exactly match the voltage source name in the circuit.
+
+3. **Analysis Result Access**: The analysis results are accessed using node numbers as string keys (e.g., `analysis["1"]` for node 1, `analysis["2"]` for node 2). The input voltage for plotting is taken from the `from` node of the swept voltage source, not from the voltage source name itself.
+
+4. **Plot Generation**: The plot is generated using matplotlib's `Figure()` API (non-pyplot) for thread-safety in Flask applications. The figure is saved to a BytesIO buffer, encoded to base64, and then closed to free memory.
+
+5. **Forward vs Backward Sweeps**: 
+   - **Forward sweep** (0V → 10V, step=0.1V): Voltage increases from initial to final
+   - **Backward sweep** (10V → 0V, step=-0.1V): Voltage decreases from initial to final
+   - The system automatically validates that the step sign matches the sweep direction
+
+6. **Step Size Validation**: The step magnitude is validated to ensure it doesn't exceed the voltage range. This prevents invalid sweep configurations that could cause errors or infinite loops. For example:
+   - Forward sweep: `step <= (final - initial)` ensures the step doesn't skip past the final voltage
+   - Backward sweep: `abs(step) <= (initial - final)` ensures the step doesn't skip past the final voltage
+
+7. **Node Tracking Validation**: The `node_to_track` must be different from the `from` node of the swept voltage source, as tracking the input node itself would result in a trivial linear plot. The system validates this to ensure meaningful analysis results.
+
+8. **Base64 Encoding**: The plot is returned as a base64-encoded PNG string, making it easy to embed directly in HTML (`<img src="data:image/png;base64,...">`) or use in React/Next.js applications without requiring separate file handling.
+
+**Use Cases:**
+
+- **Transfer Characteristics**: Analyze how output voltage changes with input voltage (e.g., amplifier gain, diode I-V curves)
+- **Linearity Analysis**: Determine the linear operating range of a circuit
+- **Threshold Detection**: Find voltage thresholds where circuit behavior changes (e.g., switching points, saturation)
+- **Component Characterization**: Understand how components respond to varying input voltages
+- **Design Validation**: Verify circuit behavior across the expected operating range
+
+**Limitations:**
+
+- Currently supports DC sweep only (no AC sweep or transient analysis)
+- Step size must be chosen carefully - very small steps may result in long simulation times, while very large steps may miss important features
+- Large voltage ranges with small steps may generate many data points and increase processing time
+- Convergence issues may occur at certain voltage points (standard SPICE limitation)
+- The plot resolution is fixed at 100 DPI - for higher resolution, modify the `dpi` parameter in `plot_to_base64()`
+
+---
+
+### 4. Ingest PDFs
 
 **Endpoint:** `POST /rag/ingest`
 
@@ -428,7 +743,7 @@ Ingestion error (500):
 
 ---
 
-### 3. RAG Chat
+### 5. RAG Chat
 
 **Endpoint:** `POST /rag/chat`
 
@@ -787,7 +1102,7 @@ The system automatically reformulates "Which is better?" to "Which op amp design
 
 ---
 
-### 4. Deck-Based Chat
+### 6. Deck-Based Chat
 
 **Endpoint:** `POST /rag/deck-chat`
 
@@ -1133,7 +1448,7 @@ Groq API error:
 
 ---
 
-### 5. Ingest Slide Decks (PDF/PPTX)
+### 7. Ingest Slide Decks (PDF/PPTX)
 
 **Endpoint:** `POST /rag/ingest-slides`
 
@@ -1268,7 +1583,7 @@ If OCR is not installed, ingestion will still work but with warnings for image-h
 
 ---
 
-### 6. Generate Quiz from Slide Decks
+### 8. Generate Quiz from Slide Decks
 
 **Endpoint:** `POST /rag/generate-quiz`
 
@@ -1487,7 +1802,7 @@ Groq API error (500):
 
 ---
 
-### 7. General LLM (Non-RAG)
+### 9. General LLM (Non-RAG)
 
 **Endpoint:** `POST /groq/general-llm`
 
@@ -2349,6 +2664,7 @@ All example responses in this document were taken directly from actual test runs
 | -------------------- | ------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------- | ------------- |
 | `/health`            | GET    | Health check                                                  | None                                                                             | "OK"                       | Plain text    |
 | `/circuit/simulate`  | POST   | Simulate electronic circuit (DC operating point)              | `circuit` (JSON with components, nodes, voltage sources, etc.)                    | Node voltages, currents    | JSON          |
+| `/circuit/dc-sweep`  | POST   | DC sweep analysis with plot                                   | `circuit`, `Vinput` (component, initial, final, step), `node_to_track`           | Base64-encoded PNG plot   | JSON          |
 | `/rag/ingest`        | POST   | Ingest PDFs from directory                                    | `data_dir` (optional)                                                            | Ingestion summary          | JSON          |
 | `/rag/chat`          | POST   | RAG-powered Q&A (with intelligent enhancements)               | `question`, `messages`, `session_id`, `top_k`, `use_query_expansion`             | Streaming answer + sources | SSE stream    |
 | `/rag/deck-chat`     | POST   | Deck-based chat (RAG filtered, with intelligent enhancements) | `question`, `messages`, `session_id`, `deck_ids`, `top_k`, `use_query_expansion` | Streaming answer + sources | SSE stream    |
