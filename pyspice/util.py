@@ -132,6 +132,115 @@ def validate_sweep_parameters(initial_voltage, final_voltage, step):
     return True, None
 
 
+def validate_transient_parameters(step_time, end_time):
+    # Check if all values are numeric
+    if not isinstance(step_time, (int, float)):
+        raise ValueError("step_time must be numeric")
+    if not isinstance(end_time, (int, float)):
+        raise ValueError("end_time must be numeric")
+    
+    # Check if step_time is positive
+    if step_time <= 0:
+        raise ValueError("step_time must be positive")
+    
+    # Check if end_time is greater than step_time
+    if end_time <= step_time:
+        raise ValueError("end_time must be greater than step_time")
+    
+    return True
+
+
+def validate_ac_parameters(start_frequency, stop_frequency, number_of_points, variation):
+    # Check if all values are numeric (except variation)
+    if not isinstance(start_frequency, (int, float)):
+        raise ValueError("start_frequency must be numeric")
+    if not isinstance(stop_frequency, (int, float)):
+        raise ValueError("stop_frequency must be numeric")
+    if not isinstance(number_of_points, (int, float)):
+        raise ValueError("number_of_points must be numeric")
+    if not isinstance(variation, str):
+        raise ValueError("variation must be a string")
+    
+    # Check if start_frequency is positive
+    if start_frequency <= 0:
+        raise ValueError("start_frequency must be positive")
+    
+    # Check if stop_frequency is greater than start_frequency
+    if stop_frequency <= start_frequency:
+        raise ValueError("stop_frequency must be greater than start_frequency")
+    
+    # Check if number_of_points is positive integer
+    if not isinstance(number_of_points, int) or number_of_points <= 0:
+        raise ValueError("number_of_points must be a positive integer")
+    
+    # Check if variation is valid
+    if variation not in ["dec", "lin"]:
+        raise ValueError("variation must be 'dec' or 'lin'")
+    
+    return True
+
+
+
+
+def plot_transient(analysis, nodes_to_track: list):
+    # Create figure without using pyplot (thread-safe method)
+    fig = Figure(figsize=(12, 6))
+    ax = fig.subplots()
+    
+    # Get time array (x-axis)
+    time = np.array(analysis.time)
+    
+    # Plot each node
+    for node in nodes_to_track:
+        node_key = str(node)
+        voltage = np.array(analysis[node_key])
+        ax.plot(time, voltage, label=f"Node {node}")
+    
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Voltage (V)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    return fig
+
+# Create a Bode plot (magnitude and phase) for AC analysis.
+def plot_ac_sweep(analysis, node_to_track: int):
+
+    # Create figure with 2 subplots (thread-safe method)
+    fig = Figure(figsize=(10, 8))
+    axes = fig.subplots(2, 1)
+    
+    # Get frequency array (x-axis)
+    frequency = np.array(analysis.frequency)
+    
+    # Get complex voltage at tracked node
+    node_key = str(node_to_track)
+    complex_voltage = np.array(analysis[node_key])
+    
+    # Calculate magnitude in dB
+    magnitude_db = 20 * np.log10(np.absolute(complex_voltage))
+    
+    # Calculate phase in degrees
+    phase_degrees = np.angle(complex_voltage, deg=True)
+    
+    # Plot magnitude (top subplot)
+    axes[0].plot(frequency, magnitude_db)
+    axes[0].set_xscale('log')
+    axes[0].set_xlabel("Frequency (Hz)")
+    axes[0].set_ylabel("Magnitude (dB)")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].set_title(f"Bode Diagram - Node {node_to_track}")
+    
+    # Plot phase (bottom subplot)
+    axes[1].plot(frequency, phase_degrees)
+    axes[1].set_xscale('log')
+    axes[1].set_xlabel("Frequency (Hz)")
+    axes[1].set_ylabel("Phase (degrees)")
+    axes[1].grid(True, alpha=0.3)
+    
+    fig.tight_layout()
+    
+    return fig
 
 
 def plot_to_base64(fig: Figure) -> str:
