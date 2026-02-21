@@ -1,0 +1,4 @@
+.title Voltage Divider
+Vinput in 0 10V
+Rr1 in out 1kOhm
+Rr2 out 0 1kOhm

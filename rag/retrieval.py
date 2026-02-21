@@ -386,7 +386,7 @@ def retrieve_slide_specific(
         if single_match:
             slide_numbers = [int(single_match.group(1))]
         else:
-            return retrieve_context(question, deck_ids=deck_ids, **kwargs)
+            return retrieve_context(question, deck_ids=deck_ids, **{k: v for k, v in kwargs.items() if k != 'deck_ids'})
     
     # 2. Retrieve slides
     where_clause = {"$and": [{"chunk_type": "slide"}, {"slide_number": {"$in": slide_numbers}}]}
@@ -397,7 +397,7 @@ def retrieve_slide_specific(
         results = collection.get(where=where_clause, include=["documents", "metadatas"])
     except Exception as e:
         logger.warning(f"Failed to retrieve slides: {e}")
-        return retrieve_context(question, deck_ids=deck_ids, **kwargs)
+        return retrieve_context(question, deck_ids=deck_ids, **{k: v for k, v in kwargs.items() if k != 'deck_ids'})
     
     # 3. Convert to context format
     contexts = []
@@ -450,7 +450,7 @@ def retrieve_context_by_type(
                 query,
                 top_k=effective_top_k,
                 use_query_expansion=False,  # Already expanded manually
-                **{k: v for k, v in kwargs.items() if k != 'top_k'}
+                **{k: v for k, v in kwargs.items() if k not in ('top_k', 'use_query_expansion')}
             )
             all_contexts.extend(ctx)
             all_queries.extend(qs)

@@ -14,7 +14,8 @@ CIRCUIT_TUTOR_SYSTEM_PROMPT = (
     "Cite sources as [source: <filename>, p.<page>] or [source: <filename>, slide <number>] where relevant. "
     "Prefer correctness and safety; include equations/diagrams when helpful. "
     "IMPORTANT: Use actual newline characters (\\n) for line breaks and paragraph separation. "
-    "Do NOT use special unicode spaces like em-space (\\u2003). Use standard markdown formatting with proper newlines."
+    "Do NOT use special unicode spaces like em-space (\\u2003). Use standard markdown formatting with proper newlines. "
+    "Example: If the user states 'Write me code for an ASM chart in VHDL', you should write a 3 state machine, and reference where in the chapter [SLIDE DECK MODE]."
 )
 
 # System prompt for general Groq assistant (used in routes/groq.py)
@@ -80,7 +81,8 @@ DECK_CHAT_SYSTEM_PROMPT = (
     "If the answer requires information not in the provided slides, say you don't know. "
     "Provide step-by-step explanations when helpful, and include equations/diagrams descriptions when relevant. "
     "IMPORTANT: Use actual newline characters (\\n) for line breaks and paragraph separation. "
-    "Do NOT use special unicode spaces like em-space (\\u2003). Use standard markdown formatting with proper newlines."
+    "Do NOT use special unicode spaces like em-space (\\u2003). Use standard markdown formatting with proper newlines. "
+    "Example: If the user states 'Write me code for an ASM chart in VHDL', you should write a 3 process machine (State register, next-state logic, output logic.), and reference where in the chapter [SLIDE DECK MODE]."
 )
 
 

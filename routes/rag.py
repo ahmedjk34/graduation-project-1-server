@@ -1,6 +1,8 @@
 # server/routes/rag.py
 from flask import Blueprint, request, jsonify, Response
 import json
+import logging
+import traceback
 
 from rag.ingest import ingest_directory, ingest_pdf_file
 from rag.retrieval import (
@@ -21,6 +23,7 @@ from utils.conversation_builder import build_conversation_messages
 
 from config import GROQ_MODEL
 
+logger = logging.getLogger(__name__)
 
 rag_bp = Blueprint("rag", __name__)
 
@@ -58,6 +61,15 @@ def ingest():
         return jsonify(summary), 200
         
     except Exception as e:
+        # Log the full error with traceback for debugging
+        error_traceback = traceback.format_exc()
+        logger.error(
+            f"PDF ingestion failed in /rag/ingest endpoint:\n"
+            f"Error: {str(e)}\n"
+            f"Type: {type(e).__name__}\n"
+            f"Traceback:\n{error_traceback}",
+            exc_info=True
+        )
         return jsonify({
             "status": "error",
             "error": str(e)
@@ -176,12 +188,27 @@ def rag_chat():
         
         # 7. Check if it's an error dict instead of Response
         if isinstance(gen_response, dict) and "error" in gen_response:
+            logger.error(
+                f"generate_answer returned error in /rag/chat endpoint:\n"
+                f"Error: {gen_response.get('error')}\n"
+                f"Question: {question}\n"
+                f"Context count: {len(ctx)}"
+            )
             return jsonify({"error": gen_response["error"]}), 500
         
         # 8. Return the SSE Response
         return gen_response
         
     except Exception as e:
+        # Log the full error with traceback for debugging
+        error_traceback = traceback.format_exc()
+        logger.error(
+            f"RAG pipeline failed in /rag/chat endpoint:\n"
+            f"Error: {str(e)}\n"
+            f"Type: {type(e).__name__}\n"
+            f"Traceback:\n{error_traceback}",
+            exc_info=True
+        )
         return jsonify({
             "error": "RAG pipeline failed",
             "details": str(e)
@@ -314,12 +341,28 @@ def deck_chat():
         
         # 7. Check if it's an error dict instead of Response
         if isinstance(gen_response, dict) and "error" in gen_response:
+            logger.error(
+                f"generate_answer returned error in /rag/deck-chat endpoint:\n"
+                f"Error: {gen_response.get('error')}\n"
+                f"Question: {question}\n"
+                f"Deck IDs: {deck_ids}\n"
+                f"Context count: {len(ctx)}"
+            )
             return jsonify({"error": gen_response["error"]}), 500
         
         # 8. Return the SSE Response
         return gen_response
         
     except Exception as e:
+        # Log the full error with traceback for debugging
+        error_traceback = traceback.format_exc()
+        logger.error(
+            f"Deck chat failed in /rag/deck-chat endpoint:\n"
+            f"Error: {str(e)}\n"
+            f"Type: {type(e).__name__}\n"
+            f"Traceback:\n{error_traceback}",
+            exc_info=True
+        )
         return jsonify({
             "error": "Deck chat failed",
             "details": str(e)
@@ -416,6 +459,15 @@ def ingest_slides():
             "error": f"Invalid file format: {str(e)}"
         }), 400
     except Exception as e:
+        # Log the full error with traceback for debugging
+        error_traceback = traceback.format_exc()
+        logger.error(
+            f"Slide ingestion failed in /rag/ingest-slides endpoint:\n"
+            f"Error: {str(e)}\n"
+            f"Type: {type(e).__name__}\n"
+            f"Traceback:\n{error_traceback}",
+            exc_info=True
+        )
         return jsonify({
             "status": "error",
             "error": f"Ingestion failed: {str(e)}"
@@ -615,4 +667,13 @@ def generate_quiz():
         }), 200
     
     except Exception as e:
+        # Log the full error with traceback for debugging
+        error_traceback = traceback.format_exc()
+        logger.error(
+            f"Quiz generation failed in /rag/generate-quiz endpoint:\n"
+            f"Error: {str(e)}\n"
+            f"Type: {type(e).__name__}\n"
+            f"Traceback:\n{error_traceback}",
+            exc_info=True
+        )
         return jsonify({"error": f"Quiz generation failed: {str(e)}"}), 500
